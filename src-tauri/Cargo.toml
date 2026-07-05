@@ -1,0 +1,28 @@
+[package]
+name = "ollama-cowork"
+version = "0.1.0"
+description = "Local-first Ollama coworking agent"
+authors = ["Ollama Cowork contributors"]
+edition = "2021"
+
+[lib]
+name = "ollama_cowork_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[features]
+default = []

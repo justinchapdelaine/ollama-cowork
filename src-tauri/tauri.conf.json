@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ollama Cowork",
+  "version": "0.1.0",
+  "identifier": "dev.ollama-cowork.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Ollama Cowork",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://127.0.0.1:* http://localhost:*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}

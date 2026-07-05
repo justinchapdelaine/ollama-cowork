@@ -24,4 +24,7 @@ pub enum AppError {
 
     #[error("session store error: {0}")]
     SessionStore(String),
+
+    #[error("agent run cancelled")]
+    Cancelled,
 }

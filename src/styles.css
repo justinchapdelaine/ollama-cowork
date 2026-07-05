@@ -14,14 +14,19 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  overflow: hidden;
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid #202124;
   background: #202124;
   color: #fff;
@@ -29,6 +34,8 @@ button {
   padding: 0 14px;
   border-radius: 6px;
   cursor: pointer;
+  line-height: 1.2;
+  text-align: center;
 }
 
 .actions {
@@ -44,9 +51,13 @@ button:disabled {
 }
 
 .shell {
-  width: min(1040px, calc(100vw - 32px));
+  width: min(1120px, calc(100vw - 24px));
+  height: 100vh;
   margin: 0 auto;
-  padding: 32px 0;
+  padding: 18px 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .topbar {
@@ -54,7 +65,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 24px;
+  margin-bottom: 14px;
 }
 
 .eyebrow {
@@ -72,7 +83,7 @@ p {
 
 h1 {
   margin-bottom: 0;
-  font-size: clamp(1.8rem, 4vw, 3rem);
+  font-size: 2rem;
   font-weight: 700;
 }
 
@@ -82,14 +93,25 @@ h2 {
 
 .panel,
 .message {
+  min-width: 0;
   border: 1px solid #d7dbe2;
   background: #fff;
   border-radius: 8px;
-  padding: 18px;
+  padding: 14px;
 }
 
 .panel {
-  margin-bottom: 18px;
+  margin-bottom: 14px;
+}
+
+.settings-panel {
+  padding-bottom: 12px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.4fr);
+  gap: 14px;
 }
 
 .field-row {
@@ -118,7 +140,7 @@ h2 {
 
 label {
   display: block;
-  margin: 14px 0 8px;
+  margin: 10px 0 6px;
   color: #3c4043;
   font-weight: 600;
 }
@@ -135,37 +157,172 @@ input {
   border-radius: 6px;
 }
 
+textarea {
+  width: 100%;
+  min-height: 76px;
+  max-height: 220px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid #c2c7cf;
+  border-radius: 6px;
+}
+
 input[readonly] {
   background: #f6f7f9;
   color: #3c4043;
 }
 
 .hint {
-  margin: 10px 0 0;
+  margin: 8px 0 0;
   color: #5f6368;
   font-size: 0.9rem;
 }
 
-.stack {
+.agent-layout {
   display: grid;
-  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  align-items: start;
+  gap: 14px;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.message-title {
-  width: 100%;
-  border-color: #c2c7cf;
-  background: #f6f7f9;
-  color: #202124;
-  text-align: left;
+.chat-panel {
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid #d7dbe2;
+  background: #fff;
+  border-radius: 8px;
 }
 
-.thinking p {
-  margin: 14px 0 0;
+.conversation {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+}
+
+.empty-state {
+  align-self: center;
+  max-width: 520px;
+  margin: auto;
+  text-align: center;
   color: #3c4043;
 }
 
+.empty-state h2 {
+  margin-bottom: 8px;
+  font-size: 1.25rem;
+}
+
+.empty-state p {
+  color: #5f6368;
+}
+
+.chat-message {
+  width: min(760px, 100%);
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #d7dbe2;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.chat-message.user {
+  align-self: flex-end;
+  border-color: #b9c6df;
+  background: #eef3fb;
+}
+
+.chat-message.assistant {
+  align-self: flex-start;
+  background: #fff;
+}
+
+.chat-message.tool {
+  align-self: flex-start;
+  border-style: dashed;
+  background: #f6f7f9;
+}
+
+.chat-message-header {
+  margin-bottom: 8px;
+  color: #5f6368;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.chat-text {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.chat-text + .chat-text,
+.chat-text + details,
+details + .chat-text,
+details + details {
+  margin-top: 12px;
+}
+
+.muted {
+  color: #5f6368;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 14px;
+  border-top: 1px solid #d7dbe2;
+  background: #f6f7f9;
+}
+
+.composer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.composer button {
+  min-width: 92px;
+}
+
+.diagnostics {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
+  max-height: 100%;
+  overflow: auto;
+}
+
+.thinking-block,
+.tool-block {
+  min-width: 0;
+  border: 1px solid #d7dbe2;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.thinking-block summary,
+.tool-block summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  color: #3c4043;
+  font-weight: 700;
+}
+
 pre {
-  min-height: 220px;
+  max-width: 100%;
+  min-height: 140px;
+  max-height: 260px;
   overflow: auto;
   margin: 0;
   padding: 14px;
@@ -175,7 +332,25 @@ pre {
   font-size: 0.9rem;
 }
 
+.thinking-block pre,
+.tool-block pre {
+  min-height: 0;
+  max-height: 320px;
+  border-radius: 0 0 6px 6px;
+}
+
 @media (max-width: 760px) {
+  body {
+    overflow: auto;
+  }
+
+  .shell {
+    height: auto;
+    min-height: 100vh;
+    grid-template-rows: auto auto auto;
+    overflow: visible;
+  }
+
   .topbar {
     align-items: stretch;
     flex-direction: column;
@@ -187,6 +362,7 @@ pre {
 
   .actions button {
     flex: 1 1 180px;
+    min-width: 0;
   }
 
   .field-row {
@@ -200,6 +376,37 @@ pre {
 
   .field-actions button {
     flex: 1 1 150px;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .settings-grid,
+  .agent-layout,
+  .composer {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-layout {
+    overflow: visible;
+  }
+
+  .composer-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .chat-panel {
+    height: min(620px, max(420px, calc(100vh - 280px)));
+    min-height: 0;
+  }
+
+  .diagnostics {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .composer button {
+    min-width: 0;
     width: 100%;
   }
 }

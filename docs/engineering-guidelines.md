@@ -78,6 +78,23 @@ Use primary documentation before making framework or runtime decisions:
 - Execute only validated structured tool calls. Never execute text from `message.content` or `message.thinking`.
 - Preserve model timing and token metadata in session logs for latency/debugging.
 - Handle streaming later, but keep the first backend implementation compatible with both streaming and non-streaming responses.
+- When streaming is implemented, use Ollama's built-in `/api/chat` streaming mode rather than polling or synthetic partial requests.
+- Keep streaming modular: expose it as a separate model-backend path, parse Ollama stream chunks inside `OllamaBackend`, and emit typed run events such as thinking deltas, content deltas, tool calls, tool results, completion, cancellation, and errors.
+- Route streamed updates through a run-event reducer in the frontend so streaming does not leak transport details into message rendering.
+
+## Session context strategy
+
+- Keep full session history available for UI rendering and audit, but build a bounded model context for each turn.
+- Put context assembly behind a replaceable `ContextBuilder` or equivalent policy module rather than scattering truncation logic through the frontend or model backend.
+- Keep raw tool results and file contents in session/artifact state. The model context should include compact tool summaries unless the exact content is still needed.
+- MVP compaction can be deterministic:
+  - preserve the system prompt and current workspace context;
+  - preserve the most recent user, assistant, tool-call, and tool-result messages;
+  - replace older tool results with concise summaries such as tool name, path/query, byte count, truncation state, and outcome;
+  - preserve important active artifacts by id when a later turn still depends on them.
+- The fuller design should add a running `SessionSummary` before the recent raw turns. It should be structured around user intent, decisions made, files inspected, important findings, current plan, open questions, and user preferences.
+- Treat model-generated summaries as helpful but untrusted context. Prefer deterministic artifact metadata for audit-critical facts.
+- Keep summary generation and context budgeting modular so alternate summarizers, token estimators, models, or MCP/skill-provided memory sources can be swapped in later.
 
 ## Tool and approval policy
 

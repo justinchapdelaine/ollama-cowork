@@ -1,8 +1,11 @@
+pub mod agent;
 pub mod approval;
+pub mod context;
 pub mod diff;
 pub mod error;
 pub mod messages;
 pub mod model;
+pub mod run;
 pub mod runtime;
 pub mod session;
 pub mod tools;

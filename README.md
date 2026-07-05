@@ -14,14 +14,15 @@ A local-first desktop coworking agent that uses Ollama models and is being built
 
 ## Current status
 
-This repo currently contains the first app scaffold and architecture spine:
+This repo currently contains the first usable local agent loop and architecture spine:
 
 - Tauri project structure.
-- Minimal frontend probe screen.
+- Frontend chat surface with a message timeline, prompt composer, diagnostics, collapsible thinking blocks, and tool call/result blocks.
 - Rust core module boundaries for model, runtime, tools, policy, approvals, diff/apply, and sessions.
-- Initial `OllamaBackend` capable of probing `/api/version` and `/api/tags`.
-- Explicit workspace root selection for tool execution, including a native folder picker.
-- Read-only `list_files` tool-call probe through the Rust tool registry.
+- `OllamaBackend` capable of probing `/api/version` and `/api/tags` and running non-streaming chat/tool turns.
+- Explicit workspace root selection for tool execution, including a native folder picker and Rust-owned workspace selection tokens.
+- Read-only workspace tools through the Rust tool registry: `list_files`, `read_file`, and `search_files`.
+- Diagnostic Ollama probe and tool probe controls for integration testing.
 - Planning direction for modular user-manageable skills and extensions.
 - Planning direction for modular MCP integration.
 - Planning docs under `docs/`.

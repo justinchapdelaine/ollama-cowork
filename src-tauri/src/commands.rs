@@ -3,11 +3,15 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
+use crate::core::agent::{
+    assistant_message_from_response, run_agent_turn as run_agent_turn_core, AgentTurnRequest,
+    AgentTurnResponse,
+};
 use crate::core::messages::{ConversationMessage, MessagePart, MessageRole, ToolCall, ToolResult};
 use crate::core::model::{
-    ChatRequest, ChatResponse, ModelBackend, OllamaBackend, OllamaConfig, ProbeOllamaResponse,
-    ThinkMode,
+    ChatRequest, ModelBackend, OllamaBackend, OllamaConfig, ProbeOllamaResponse, ThinkMode,
 };
+use crate::core::run::{AgentRunStore, CancellationFlag};
 use crate::core::tools::{LocalToolRegistry, ToolExecutionRequest, ToolRegistry};
 use crate::core::workspace::{WorkspaceContext, WorkspaceSelection, WorkspaceSelectionStore};
 
@@ -90,11 +94,14 @@ pub async fn run_tool_probe(
     }
 
     let tool_result = tools
-        .execute(ToolExecutionRequest {
-            call_id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-            arguments: tool_call.arguments.clone(),
-        })
+        .execute(
+            ToolExecutionRequest {
+                call_id: tool_call.id.clone(),
+                name: tool_call.name.clone(),
+                arguments: tool_call.arguments.clone(),
+            },
+            CancellationFlag::default(),
+        )
         .await
         .map_err(|err| err.to_string())?;
     let assistant = assistant_message_from_response(first.clone());
@@ -126,26 +133,58 @@ pub async fn run_tool_probe(
     })
 }
 
-fn assistant_message_from_response(response: ChatResponse) -> ConversationMessage {
-    let mut parts = Vec::new();
+#[tauri::command]
+pub async fn run_agent_turn(
+    request: AgentTurnCommandRequest,
+    selections: State<'_, WorkspaceSelectionStore>,
+    runs: State<'_, AgentRunStore>,
+) -> Result<AgentTurnResponse, String> {
+    let config = OllamaConfig::new(request.base_url).map_err(|err| err.to_string())?;
+    let backend = OllamaBackend::new(config).map_err(|err| err.to_string())?;
+    let workspace = selections
+        .get(request.workspace_id)
+        .map_err(|err| err.to_string())?;
+    let tools = LocalToolRegistry::new(workspace);
+    let cancellation = runs.begin(request.run_id).map_err(|err| err.to_string())?;
 
-    if let Some(thinking) = response.thinking {
-        parts.push(MessagePart::Thinking { text: thinking });
-    }
+    let result = run_agent_turn_core(
+        &backend,
+        &tools,
+        AgentTurnRequest {
+            model: request.model,
+            history: request.history,
+            user_prompt: request.user_prompt,
+            tools: tools.definitions(),
+        },
+        cancellation,
+    )
+    .await;
+    let finish_result = runs.finish(request.run_id);
 
-    if let Some(content) = response.content {
-        parts.push(MessagePart::Text { text: content });
+    match (result, finish_result) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Err(err), _) => Err(err.to_string()),
+        (Ok(_), Err(err)) => Err(err.to_string()),
     }
+}
 
-    for call in response.tool_calls {
-        parts.push(MessagePart::ToolCall { call });
-    }
+#[tauri::command]
+pub async fn cancel_agent_run(
+    run_id: Uuid,
+    runs: State<'_, AgentRunStore>,
+) -> Result<bool, String> {
+    runs.cancel(run_id).map_err(|err| err.to_string())
+}
 
-    ConversationMessage {
-        id: Uuid::new_v4(),
-        role: MessageRole::Assistant,
-        parts,
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTurnCommandRequest {
+    pub base_url: String,
+    pub model: String,
+    pub workspace_id: Uuid,
+    pub run_id: Uuid,
+    pub user_prompt: String,
+    pub history: Vec<ConversationMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

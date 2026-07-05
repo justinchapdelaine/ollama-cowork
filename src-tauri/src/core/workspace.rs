@@ -1,6 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::core::error::{AppError, AppResult};
 
@@ -78,5 +83,63 @@ impl WorkspaceContext {
         }
 
         Ok(resolved)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct WorkspaceSelectionStore {
+    selections: Mutex<HashMap<Uuid, WorkspaceContext>>,
+}
+
+impl WorkspaceSelectionStore {
+    pub fn insert(&self, workspace: WorkspaceContext) -> AppResult<WorkspaceSelection> {
+        let id = Uuid::new_v4();
+        let source_root = workspace.source_root().display().to_string();
+        self.selections
+            .lock()
+            .map_err(|err| AppError::Runtime(format!("workspace selection store poisoned: {err}")))?
+            .insert(id, workspace);
+
+        Ok(WorkspaceSelection { id, source_root })
+    }
+
+    pub fn get(&self, id: Uuid) -> AppResult<WorkspaceContext> {
+        self.selections
+            .lock()
+            .map_err(|err| AppError::Runtime(format!("workspace selection store poisoned: {err}")))?
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::PolicyDenied("unknown workspace selection".to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSelection {
+    pub id: Uuid,
+    pub source_root: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_selection_store_returns_selected_workspace_by_id() {
+        let store = WorkspaceSelectionStore::default();
+        let workspace = WorkspaceContext::new(PathBuf::from(".")).expect("test workspace");
+        let selection = store.insert(workspace.clone()).expect("insert selection");
+
+        let stored = store.get(selection.id).expect("stored selection");
+        assert_eq!(stored, workspace);
+    }
+
+    #[test]
+    fn workspace_selection_store_rejects_unknown_ids() {
+        let store = WorkspaceSelectionStore::default();
+        let err = store
+            .get(Uuid::new_v4())
+            .expect_err("unknown ids must be rejected");
+
+        assert!(err.to_string().contains("unknown workspace selection"));
     }
 }

@@ -135,6 +135,11 @@ input {
   border-radius: 6px;
 }
 
+input[readonly] {
+  background: #f6f7f9;
+  color: #3c4043;
+}
+
 .hint {
   margin: 10px 0 0;
   color: #5f6368;

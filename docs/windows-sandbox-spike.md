@@ -53,6 +53,8 @@ Keep each replaceable part behind a narrow interface:
 
 - `ModelBackend`: Ollama first, possible future providers later.
 - `AgentOrchestrator`: message loop, tool-call parsing, tool-result feedback.
+- `SkillRegistry`: built-in and user-enabled skills, prompts, resources, and tool declarations.
+- `ExtensionHost`: MCP and future external extension lifecycle, transport, and capability negotiation.
 - `ToolRegistry`: structured tool schemas and handlers.
 - `ToolPolicy`: deterministic allow/prompt/deny decisions.
 - `ApprovalReviewer`: user approval first, optional auto-review later.
@@ -63,6 +65,10 @@ Keep each replaceable part behind a narrow interface:
 - `SessionStore`: SQLite task logs, tool calls, approvals, command outputs, and applied patches.
 
 The agent should not know which `WorkspaceRuntime` is active.
+
+Skills and extensions should remain modular. User-enabled skills can shape prompts, workflows, resources, and requested tools, but executable capabilities still flow through `ToolRegistry`, `ToolPolicy`, approvals, and the active workspace runtime. Skill identity, versioning, trust scope, and future external-extension behavior should stay independent from the Windows sandbox implementation.
+
+MCP integration should also stay independent from the Windows sandbox implementation. MCP servers can contribute prompts, resources, and tool definitions through `ExtensionHost`, but MCP roots, sampling, elicitation, transports, authorization, and tool execution remain host-policy decisions.
 
 ## Environment survey
 

@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use crate::core::messages::{ConversationMessage, MessagePart, MessageRole, ToolCall, ToolResult};
@@ -7,7 +9,7 @@ use crate::core::model::{
     ThinkMode,
 };
 use crate::core::tools::{LocalToolRegistry, ToolExecutionRequest, ToolRegistry};
-use crate::core::workspace::WorkspaceContext;
+use crate::core::workspace::{WorkspaceContext, WorkspaceSelection, WorkspaceSelectionStore};
 
 #[tauri::command]
 pub async fn probe_ollama(base_url: String) -> Result<ProbeOllamaResponse, String> {
@@ -17,14 +19,36 @@ pub async fn probe_ollama(base_url: String) -> Result<ProbeOllamaResponse, Strin
 }
 
 #[tauri::command]
+pub async fn choose_workspace(
+    app: AppHandle,
+    selections: State<'_, WorkspaceSelectionStore>,
+) -> Result<Option<WorkspaceSelection>, String> {
+    let Some(folder) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(None);
+    };
+
+    let path = folder
+        .into_path()
+        .map_err(|err| format!("selected workspace path could not be resolved: {err}"))?;
+    let workspace = WorkspaceContext::new(path).map_err(|err| err.to_string())?;
+    selections
+        .insert(workspace)
+        .map(Some)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub async fn run_tool_probe(
     base_url: String,
     model: String,
-    workspace_root: String,
+    workspace_id: Uuid,
+    selections: State<'_, WorkspaceSelectionStore>,
 ) -> Result<ToolProbeResponse, String> {
     let config = OllamaConfig::new(base_url).map_err(|err| err.to_string())?;
     let backend = OllamaBackend::new(config).map_err(|err| err.to_string())?;
-    let workspace = WorkspaceContext::new(workspace_root).map_err(|err| err.to_string())?;
+    let workspace = selections
+        .get(workspace_id)
+        .map_err(|err| err.to_string())?;
     let tools = LocalToolRegistry::new(workspace.clone());
     let tool_definitions = tools.definitions();
 

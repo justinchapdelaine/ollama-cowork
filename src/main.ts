@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
 type ProbeOllamaResponse = {
@@ -34,6 +33,11 @@ type ToolProbeResponse = {
   done_reason?: string;
 };
 
+type WorkspaceSelection = {
+  id: string;
+  source_root: string;
+};
+
 const app = document.querySelector<HTMLElement>("#app");
 
 if (!app) {
@@ -60,7 +64,7 @@ app.innerHTML = `
           <button id="choose-workspace" type="button">Choose folder</button>
         </div>
       </div>
-      <input id="workspace-root" placeholder="Choose a workspace folder" spellcheck="false" />
+      <input id="workspace-root" placeholder="Choose a workspace folder" spellcheck="false" readonly />
       <label for="base-url">Ollama base URL</label>
       <input id="base-url" value="http://127.0.0.1:11434" spellcheck="false" />
       <label for="model">Model</label>
@@ -111,6 +115,7 @@ const thinkingBody = document.querySelector<HTMLPreElement>("#thinking-body");
 const toolCall = document.querySelector<HTMLPreElement>("#tool-call");
 const toolResult = document.querySelector<HTMLPreElement>("#tool-result");
 const finalContent = document.querySelector<HTMLPreElement>("#final-content");
+let selectedWorkspaceId: string | null = null;
 
 thinkingButton?.addEventListener("click", () => {
   if (!thinkingBody) return;
@@ -120,11 +125,10 @@ thinkingButton?.addEventListener("click", () => {
 });
 
 function updateToolProbeState() {
-  if (!toolProbe || !workspaceRoot) return;
-  toolProbe.disabled = workspaceRoot.value.trim().length === 0;
+  if (!toolProbe) return;
+  toolProbe.disabled = selectedWorkspaceId === null;
 }
 
-workspaceRoot?.addEventListener("input", updateToolProbeState);
 updateToolProbeState();
 
 chooseWorkspace?.addEventListener("click", async () => {
@@ -132,14 +136,11 @@ chooseWorkspace?.addEventListener("click", async () => {
 
   chooseWorkspace.disabled = true;
   try {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: "Choose workspace folder",
-    });
+    const selected = await invoke<WorkspaceSelection | null>("choose_workspace");
 
-    if (typeof selected === "string") {
-      workspaceRoot.value = selected;
+    if (selected) {
+      selectedWorkspaceId = selected.id;
+      workspaceRoot.value = selected.source_root;
       updateToolProbeState();
     }
   } catch (error) {
@@ -183,7 +184,7 @@ toolProbe?.addEventListener("click", async () => {
     return;
   }
 
-  if (workspaceRoot.value.trim().length === 0) {
+  if (!selectedWorkspaceId) {
     output.textContent = "Choose a workspace folder before running the tool probe.";
     return;
   }
@@ -199,7 +200,7 @@ toolProbe?.addEventListener("click", async () => {
     const result = await invoke<ToolProbeResponse>("run_tool_probe", {
       baseUrl: baseUrl.value,
       model: model.value,
-      workspaceRoot: workspaceRoot.value,
+      workspaceId: selectedWorkspaceId,
     });
 
     output.textContent = JSON.stringify(

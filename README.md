@@ -22,6 +22,8 @@ This repo currently contains the first app scaffold and architecture spine:
 - Initial `OllamaBackend` capable of probing `/api/version` and `/api/tags`.
 - Explicit workspace root selection for tool execution, including a native folder picker.
 - Read-only `list_files` tool-call probe through the Rust tool registry.
+- Planning direction for modular user-manageable skills and extensions.
+- Planning direction for modular MCP integration.
 - Planning docs under `docs/`.
 
 ## Prerequisites
@@ -52,3 +54,5 @@ http://<lan-ollama-host>:11434
 
 - [Windows sandbox spike](docs/windows-sandbox-spike.md)
 - [Engineering guidelines](docs/engineering-guidelines.md)
+- [Skills and extensions](docs/skills-and-extensions.md)
+- [MCP integration](docs/mcp-integration.md)

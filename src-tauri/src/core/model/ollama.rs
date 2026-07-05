@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::Duration;
-use url::Url;
+use std::{net::IpAddr, time::Duration};
+use url::{Host, Url};
 
 use crate::core::error::{AppError, AppResult};
 use crate::core::messages::{MessagePart, MessageRole, ToolCall};
@@ -31,6 +31,8 @@ impl OllamaConfig {
             ));
         }
 
+        validate_ollama_base_url_policy(&base_url)?;
+
         Ok(Self { base_url })
     }
 
@@ -42,6 +44,47 @@ impl OllamaConfig {
 
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+}
+
+fn validate_ollama_base_url_policy(base_url: &Url) -> AppResult<()> {
+    if base_url.username() != "" || base_url.password().is_some() {
+        return Err(AppError::PolicyDenied(
+            "Ollama URL must not include credentials".to_string(),
+        ));
+    }
+
+    let Some(host) = base_url.host() else {
+        return Err(AppError::InvalidConfig(
+            "Ollama URL must include a host".to_string(),
+        ));
+    };
+
+    match host {
+        Host::Domain(domain) if domain.eq_ignore_ascii_case("localhost") => Ok(()),
+        Host::Domain(_) => Err(AppError::PolicyDenied(
+            "Ollama URL host must be localhost or a private IP address".to_string(),
+        )),
+        Host::Ipv4(ip) if is_allowed_ollama_ip(IpAddr::V4(ip)) => Ok(()),
+        Host::Ipv4(ip) => Err(AppError::PolicyDenied(format!(
+            "Ollama URL host is outside the allowed local/private address ranges: {ip}"
+        ))),
+        Host::Ipv6(ip) if is_allowed_ollama_ip(IpAddr::V6(ip)) => Ok(()),
+        Host::Ipv6(ip) => Err(AppError::PolicyDenied(format!(
+            "Ollama URL host is outside the allowed local/private address ranges: {ip}"
+        ))),
+    }
+}
+
+fn is_allowed_ollama_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1])
+        }
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
     }
 }
 
@@ -286,5 +329,31 @@ impl From<OllamaToolCall> for ToolCall {
             name: call.function.name,
             arguments: call.function.arguments,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ollama_config_accepts_localhost() {
+        assert!(OllamaConfig::new("http://localhost:11434".to_string()).is_ok());
+        assert!(OllamaConfig::new("http://127.0.0.1:11434".to_string()).is_ok());
+        assert!(OllamaConfig::new("http://[::1]:11434".to_string()).is_ok());
+    }
+
+    #[test]
+    fn ollama_config_accepts_private_lan_ips() {
+        assert!(OllamaConfig::new("http://192.168.1.2:11434".to_string()).is_ok());
+        assert!(OllamaConfig::new("http://10.0.0.2:11434".to_string()).is_ok());
+        assert!(OllamaConfig::new("http://172.16.0.2:11434".to_string()).is_ok());
+    }
+
+    #[test]
+    fn ollama_config_rejects_public_or_named_hosts() {
+        assert!(OllamaConfig::new("https://example.com:11434".to_string()).is_err());
+        assert!(OllamaConfig::new("http://8.8.8.8:11434".to_string()).is_err());
+        assert!(OllamaConfig::new("http://user:pass@127.0.0.1:11434".to_string()).is_err());
     }
 }

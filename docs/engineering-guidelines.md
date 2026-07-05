@@ -12,6 +12,7 @@ Use primary documentation before making framework or runtime decisions:
 - Ollama API docs for chat, thinking, tool calls, structured output, streaming, and model metadata.
 - Rust and Cargo docs for package layout, error handling, and idiomatic library boundaries.
 - Microsoft Learn for Windows process creation, tokens/users, ACLs, job objects, desktops, and firewall policy.
+- MCP specification docs for external prompts, resources, tools, roots, sampling, elicitation, transports, lifecycle, and authorization.
 
 ## Tauri and frontend boundary
 
@@ -29,6 +30,8 @@ Use primary documentation before making framework or runtime decisions:
 - Prefer traits for subsystem boundaries:
   - `ModelBackend`
   - `WorkspaceRuntime`
+  - `SkillRegistry`
+  - `ExtensionHost`
   - `ToolRegistry`
   - `ToolPolicy`
   - `ApprovalReviewer`
@@ -40,6 +43,31 @@ Use primary documentation before making framework or runtime decisions:
 - Keep Windows-specific code behind runtime modules so future macOS, WSL, or VM-backed runtimes do not leak into orchestration code.
 - Avoid `unsafe` unless a Windows API call truly requires it; isolate and document any `unsafe` block.
 - Add focused tests for policy decisions, Ollama response parsing, path validation, diff generation, and patch application before broad UI tests.
+
+## Skills and extensions
+
+- Support user-manageable skills as a first-class modularity goal.
+- Keep skills separate from capabilities: a skill may contribute instructions, workflows, prompts, resources, or tool declarations, but it must not directly grant filesystem, shell, network, Tauri plugin, sandbox, or approval privileges.
+- Route executable behavior through `ToolRegistry`, `ToolPolicy`, `ApprovalReviewer`, and `WorkspaceRuntime`.
+- Treat skill manifests, descriptions, and instructions as untrusted input until validated and explicitly enabled.
+- Prefer workspace-scoped user skills by default; global skills should be an explicit user choice.
+- Make enabled skills visible in the session UI and audit any tool calls they influence.
+- Track skill identity, source, version, trust scope, and update provenance separately from display names.
+- Validate skill-contributed tool input and output schemas before exposing or consuming tool data.
+- Keep skill-contributed tool names stable, namespaced, case-sensitive, and limited to predictable ASCII identifier characters.
+- Treat skill and tool annotations, descriptions, icons, and display metadata as advisory and untrusted unless they come from a trusted bundled source.
+- Treat future roots, sampling, elicitation, and external extension servers as explicit host-policy features, not implicit permissions granted by a skill.
+- See [Skills and extensions](skills-and-extensions.md) for the product and architecture policy.
+
+## MCP integration
+
+- Treat MCP as an extension boundary behind `ExtensionHost`, not as direct model access to external servers.
+- Normalize MCP prompts, resources, and tools into app registries before exposing them to a session.
+- Keep MCP roots mapped to explicit workspace roots, and never let an MCP server expand filesystem scope by itself.
+- Gate MCP sampling, elicitation, HTTP transport, authorization, and task-augmented execution behind separate host policies.
+- Prefer stdio first for MVP MCP experiments; add Streamable HTTP only after network policy, authentication, and local-server safety are explicit.
+- Audit MCP server lifecycle, capability negotiation, prompt/resource inclusion, tool calls, approvals, and errors.
+- See [MCP integration](mcp-integration.md) for the dedicated integration policy.
 
 ## Ollama backend
 
@@ -88,6 +116,16 @@ Use primary documentation before making framework or runtime decisions:
 - Tauri process model: https://tauri.app/concept/process-model/
 - Ollama API: https://docs.ollama.com/api
 - Ollama API source mirror: https://github.com/ollama/ollama/blob/main/docs/api.md
+- MCP specification: https://modelcontextprotocol.io/specification/2025-11-25
+- MCP tools: https://modelcontextprotocol.io/specification/2025-11-25/server/tools
+- MCP prompts: https://modelcontextprotocol.io/specification/2025-11-25/server/prompts
+- MCP resources: https://modelcontextprotocol.io/specification/2025-11-25/server/resources
+- MCP roots: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+- MCP sampling: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling
+- MCP elicitation: https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation
+- MCP lifecycle: https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+- MCP transports: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+- MCP authorization: https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
 - Rust API Guidelines: https://rust-lang.github.io/api-guidelines/
 - Rust error handling: https://doc.rust-lang.org/book/ch09-00-error-handling.html
 - Cargo package layout: https://doc.rust-lang.org/cargo/guide/project-layout.html

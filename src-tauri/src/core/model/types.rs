@@ -5,10 +5,34 @@ use serde_json::Value;
 use crate::core::error::AppResult;
 use crate::core::messages::{ConversationMessage, ToolCall};
 
+pub type ChatStreamCallback<'a> = dyn FnMut(ChatStreamEvent) -> AppResult<()> + Send + 'a;
+
 #[async_trait]
 pub trait ModelBackend: Send + Sync {
     async fn probe(&self) -> AppResult<ProbeOllamaResponse>;
     async fn chat(&self, request: ChatRequest) -> AppResult<ChatResponse>;
+
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        on_event: &mut ChatStreamCallback<'_>,
+    ) -> AppResult<ChatResponse> {
+        let response = self.chat(request).await?;
+
+        if let Some(thinking) = response.thinking.clone() {
+            on_event(ChatStreamEvent::ThinkingDelta { text: thinking })?;
+        }
+
+        if let Some(content) = response.content.clone() {
+            on_event(ChatStreamEvent::ContentDelta { text: content })?;
+        }
+
+        for call in response.tool_calls.iter().cloned() {
+            on_event(ChatStreamEvent::ToolCall { call })?;
+        }
+
+        Ok(response)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +64,14 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
     pub done_reason: Option<String>,
     pub timings: ModelTimings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatStreamEvent {
+    ThinkingDelta { text: String },
+    ContentDelta { text: String },
+    ToolCall { call: ToolCall },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

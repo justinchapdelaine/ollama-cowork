@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -8,7 +9,8 @@ use url::{Host, Url};
 use crate::core::error::{AppError, AppResult};
 use crate::core::messages::{MessagePart, MessageRole, ToolCall};
 use crate::core::model::types::{
-    ChatRequest, ChatResponse, ModelBackend, ModelInfo, ModelTimings, ProbeOllamaResponse,
+    ChatRequest, ChatResponse, ChatStreamCallback, ChatStreamEvent, ModelBackend, ModelInfo,
+    ModelTimings, ProbeOllamaResponse,
 };
 
 const OLLAMA_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -197,6 +199,149 @@ impl ModelBackend for OllamaBackend {
             },
         })
     }
+
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        on_event: &mut ChatStreamCallback<'_>,
+    ) -> AppResult<ChatResponse> {
+        let body = json!({
+            "model": request.model,
+            "messages": request.messages.into_iter().map(to_ollama_message).collect::<Vec<_>>(),
+            "tools": request.tools.into_iter().map(|tool| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                })
+            }).collect::<Vec<_>>(),
+            "think": request.think,
+            "stream": true,
+        });
+
+        let response = self
+            .client
+            .post(self.config.endpoint("/api/chat")?)
+            .timeout(OLLAMA_CHAT_TIMEOUT)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AppError::ModelBackend(err.to_string()))?
+            .error_for_status()
+            .map_err(|err| AppError::ModelBackend(err.to_string()))?;
+
+        let mut aggregate = ChatResponseBuilder::default();
+        let mut stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| AppError::ModelBackend(err.to_string()))?;
+            buffer.extend_from_slice(&chunk);
+
+            while let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
+                let line = buffer.drain(..=position).collect::<Vec<_>>();
+                parse_stream_line(&line, &mut aggregate, on_event)?;
+            }
+        }
+
+        if !buffer.is_empty() {
+            parse_stream_line(&buffer, &mut aggregate, on_event)?;
+        }
+
+        if !aggregate.is_done() {
+            return Err(AppError::ModelBackend(
+                "Ollama stream ended before terminal done chunk".to_string(),
+            ));
+        }
+
+        Ok(aggregate.build())
+    }
+}
+
+#[derive(Debug, Default)]
+struct ChatResponseBuilder {
+    thinking: String,
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    done: bool,
+    done_reason: Option<String>,
+    timings: ModelTimings,
+}
+
+impl ChatResponseBuilder {
+    fn apply_chunk(
+        &mut self,
+        chunk: OllamaChatResponse,
+        on_event: &mut ChatStreamCallback<'_>,
+    ) -> AppResult<()> {
+        if let Some(thinking) = chunk
+            .message
+            .thinking
+            .filter(|thinking| !thinking.is_empty())
+        {
+            self.thinking.push_str(&thinking);
+            on_event(ChatStreamEvent::ThinkingDelta { text: thinking })?;
+        }
+
+        if let Some(content) = chunk.message.content.filter(|content| !content.is_empty()) {
+            self.content.push_str(&content);
+            on_event(ChatStreamEvent::ContentDelta { text: content })?;
+        }
+
+        for call in chunk.message.tool_calls.unwrap_or_default() {
+            let call = ToolCall::from(call);
+            self.tool_calls.push(call.clone());
+            on_event(ChatStreamEvent::ToolCall { call })?;
+        }
+
+        if chunk.done.unwrap_or(false) {
+            self.done = true;
+            self.done_reason = chunk.done_reason;
+            self.timings = ModelTimings {
+                total_duration_ns: chunk.total_duration,
+                load_duration_ns: chunk.load_duration,
+                prompt_eval_count: chunk.prompt_eval_count,
+                prompt_eval_duration_ns: chunk.prompt_eval_duration,
+                eval_count: chunk.eval_count,
+                eval_duration_ns: chunk.eval_duration,
+            };
+        }
+
+        Ok(())
+    }
+
+    fn is_done(&self) -> bool {
+        self.done
+    }
+
+    fn build(self) -> ChatResponse {
+        ChatResponse {
+            thinking: (!self.thinking.is_empty()).then_some(self.thinking),
+            content: (!self.content.is_empty()).then_some(self.content),
+            tool_calls: self.tool_calls,
+            done_reason: self.done_reason,
+            timings: self.timings,
+        }
+    }
+}
+
+fn parse_stream_line(
+    line: &[u8],
+    aggregate: &mut ChatResponseBuilder,
+    on_event: &mut ChatStreamCallback<'_>,
+) -> AppResult<()> {
+    let line = String::from_utf8_lossy(line);
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let chunk = serde_json::from_str::<OllamaChatResponse>(trimmed)
+        .map_err(|err| AppError::ModelBackend(format!("invalid Ollama stream chunk: {err}")))?;
+    aggregate.apply_chunk(chunk, on_event)
 }
 
 pub(crate) fn to_ollama_message(message: crate::core::messages::ConversationMessage) -> Value {
@@ -294,6 +439,7 @@ impl From<OllamaModel> for ModelInfo {
 #[derive(Debug, Deserialize)]
 struct OllamaChatResponse {
     message: OllamaMessage,
+    done: Option<bool>,
     done_reason: Option<String>,
     total_duration: Option<u64>,
     load_duration: Option<u64>,
@@ -355,5 +501,53 @@ mod tests {
         assert!(OllamaConfig::new("https://example.com:11434".to_string()).is_err());
         assert!(OllamaConfig::new("http://8.8.8.8:11434".to_string()).is_err());
         assert!(OllamaConfig::new("http://user:pass@127.0.0.1:11434".to_string()).is_err());
+    }
+
+    #[test]
+    fn stream_parser_aggregates_deltas_and_emits_events() {
+        let mut aggregate = ChatResponseBuilder::default();
+        let mut events = Vec::new();
+        let mut event_sink = |event| {
+            events.push(event);
+            Ok(())
+        };
+
+        parse_stream_line(
+            br#"{"message":{"thinking":"Need files. "},"done":false}"#,
+            &mut aggregate,
+            &mut event_sink,
+        )
+        .expect("thinking chunk");
+        assert!(!aggregate.is_done());
+
+        parse_stream_line(
+            br#"{"message":{"content":"Done."},"done":false}"#,
+            &mut aggregate,
+            &mut event_sink,
+        )
+        .expect("content chunk");
+        assert!(!aggregate.is_done());
+
+        parse_stream_line(
+            br#"{"message":{"content":""},"done":true,"done_reason":"stop","eval_count":3}"#,
+            &mut aggregate,
+            &mut event_sink,
+        )
+        .expect("done chunk");
+        assert!(aggregate.is_done());
+
+        let response = aggregate.build();
+
+        assert_eq!(response.thinking.as_deref(), Some("Need files. "));
+        assert_eq!(response.content.as_deref(), Some("Done."));
+        assert_eq!(response.done_reason.as_deref(), Some("stop"));
+        assert_eq!(response.timings.eval_count, Some(3));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ChatStreamEvent::ThinkingDelta { .. },
+                ChatStreamEvent::ContentDelta { .. }
+            ]
+        ));
     }
 }

@@ -53,6 +53,7 @@ http://<lan-ollama-host>:11434
 
 ## Docs
 
+- [Project plan](docs/project-plan.md)
 - [Windows sandbox spike](docs/windows-sandbox-spike.md)
 - [Engineering guidelines](docs/engineering-guidelines.md)
 - [Skills and extensions](docs/skills-and-extensions.md)

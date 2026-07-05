@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 type ProbeOllamaResponse = {
@@ -46,6 +47,26 @@ type AgentTurnResponse = {
   tool_iteration_count: number;
 };
 
+type AgentRunEvent =
+  | { type: "message_appended"; message: ConversationMessage }
+  | { type: "assistant_started"; message: ConversationMessage }
+  | { type: "thinking_delta"; message_id: string; text: string }
+  | { type: "content_delta"; message_id: string; text: string }
+  | { type: "tool_call"; message_id: string; call: ToolCall }
+  | {
+      type: "completed";
+      done_reason?: string;
+      tool_iteration_count: number;
+      appended_messages: number;
+    }
+  | { type: "cancelled" }
+  | { type: "error"; message: string };
+
+type AgentRunEventEnvelope = {
+  runId: string;
+  event: AgentRunEvent;
+};
+
 type ToolProbeResponse = {
   first_thinking?: string;
   tool_call: ToolCall;
@@ -61,6 +82,7 @@ type WorkspaceSelection = {
 };
 
 const app = document.querySelector<HTMLElement>("#app");
+const AGENT_RUN_EVENT = "agent-run-event";
 
 if (!app) {
   throw new Error("Missing #app root");
@@ -150,6 +172,9 @@ const toolProbeOutput = document.querySelector<HTMLPreElement>("#tool-probe-outp
 let selectedWorkspaceId: string | null = null;
 let isRunning = false;
 let activeRunId: string | null = null;
+let activeRunHadModelEvents = false;
+const activeRunMessageIds = new Set<string>();
+const activeRunAssistantMessageIds = new Set<string>();
 const history: ConversationMessage[] = [];
 
 function setStatus(value: string) {
@@ -250,7 +275,10 @@ function renderMessage(message: ConversationMessage): HTMLElement {
   if (article.childElementCount === 1) {
     const body = document.createElement("p");
     body.className = "chat-text muted";
-    body.textContent = "(No renderable message parts.)";
+    body.textContent =
+      message.role === "assistant" && isRunning
+        ? "Waiting for streamed response..."
+        : "(No renderable message parts.)";
     article.append(body);
   }
 
@@ -268,6 +296,151 @@ function renderToolBlock(title: string, value: unknown): HTMLElement {
   details.append(summary, pre);
   return details;
 }
+
+function findMessage(messageId: string): ConversationMessage | undefined {
+  return history.find((message) => message.id === messageId);
+}
+
+function appendTextPart(
+  messageId: string,
+  type: "thinking" | "text",
+  text: string,
+) {
+  const message = findMessage(messageId);
+  if (!message) return;
+
+  const existing = message.parts.find((part) => part.type === type);
+  if (existing?.type === type) {
+    existing.text += text;
+    return;
+  }
+
+  message.parts.push({ type, text });
+}
+
+function appendToolCall(messageId: string, call: ToolCall) {
+  const message = findMessage(messageId);
+  if (!message) return;
+
+  message.parts.push({ type: "tool_call", call });
+}
+
+function trackActiveRunMessage(message: ConversationMessage) {
+  activeRunMessageIds.add(message.id);
+  if (message.role === "assistant") {
+    activeRunAssistantMessageIds.add(message.id);
+  }
+}
+
+function removeActiveRunMessages() {
+  if (activeRunMessageIds.size === 0) return false;
+
+  const originalLength = history.length;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (activeRunMessageIds.has(history[index].id)) {
+      history.splice(index, 1);
+    }
+  }
+
+  return history.length !== originalLength;
+}
+
+function reconcileActiveRunMessages(messages: ConversationMessage[]) {
+  removeActiveRunMessages();
+  history.push(...messages);
+  activeRunMessageIds.clear();
+  activeRunAssistantMessageIds.clear();
+  renderConversation();
+}
+
+function removeEmptyActiveAssistantMessages() {
+  if (activeRunAssistantMessageIds.size === 0) return;
+
+  const originalLength = history.length;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index];
+    if (
+      message.role === "assistant" &&
+      message.parts.length === 0 &&
+      activeRunAssistantMessageIds.has(message.id)
+    ) {
+      history.splice(index, 1);
+    }
+  }
+
+  if (history.length !== originalLength) {
+    renderConversation();
+  }
+}
+
+function applyAgentRunEvent(envelope: AgentRunEventEnvelope) {
+  if (envelope.runId !== activeRunId) return;
+
+  const { event } = envelope;
+
+  if (event.type === "assistant_started") {
+    trackActiveRunMessage(event.message);
+    history.push(event.message);
+    renderConversation();
+    return;
+  }
+
+  if (event.type === "message_appended") {
+    trackActiveRunMessage(event.message);
+    history.push(event.message);
+    renderConversation();
+    return;
+  }
+
+  if (event.type === "thinking_delta") {
+    activeRunHadModelEvents = true;
+    appendTextPart(event.message_id, "thinking", event.text);
+    renderConversation();
+    return;
+  }
+
+  if (event.type === "content_delta") {
+    activeRunHadModelEvents = true;
+    appendTextPart(event.message_id, "text", event.text);
+    renderConversation();
+    return;
+  }
+
+  if (event.type === "tool_call") {
+    activeRunHadModelEvents = true;
+    appendToolCall(event.message_id, event.call);
+    renderConversation();
+    return;
+  }
+
+  if (event.type === "completed") {
+    setStatus(
+      formatJson({
+        done_reason: event.done_reason,
+        tool_iteration_count: event.tool_iteration_count,
+        appended_messages: event.appended_messages,
+      }),
+    );
+    return;
+  }
+
+  if (event.type === "cancelled") {
+    removeEmptyActiveAssistantMessages();
+    activeRunAssistantMessageIds.clear();
+    setStatus("Run cancelled.");
+    return;
+  }
+
+  if (event.type === "error") {
+    removeEmptyActiveAssistantMessages();
+    activeRunAssistantMessageIds.clear();
+    setStatus(event.message);
+  }
+}
+
+void listen<AgentRunEventEnvelope>(AGENT_RUN_EVENT, (event) => {
+  applyAgentRunEvent(event.payload);
+});
 
 chooseWorkspace?.addEventListener("click", async () => {
   if (!workspaceRoot || !chooseWorkspace) return;
@@ -374,12 +547,13 @@ composer?.addEventListener("submit", async (event) => {
 
   isRunning = true;
   activeRunId = crypto.randomUUID();
+  activeRunHadModelEvents = false;
   updateReadyState();
   setStatus("Running agent turn...");
   promptInput.value = "";
 
   try {
-    const result = await invoke<AgentTurnResponse>("run_agent_turn", {
+    const result = await invoke<AgentTurnResponse>("run_agent_turn_stream", {
       request: {
         baseUrl: baseUrl.value,
         model: model.value,
@@ -390,8 +564,7 @@ composer?.addEventListener("submit", async (event) => {
       },
     });
 
-    history.push(...result.messages);
-    renderConversation();
+    reconcileActiveRunMessages(result.messages);
     setStatus(
       formatJson({
         done_reason: result.done_reason,
@@ -401,10 +574,46 @@ composer?.addEventListener("submit", async (event) => {
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    setStatus(message.includes("agent run cancelled") ? "Run cancelled." : message);
+    if (!activeRunHadModelEvents && !message.includes("agent run cancelled")) {
+      try {
+        const fallbackHistory = history.filter(
+          (message) => !activeRunMessageIds.has(message.id),
+        );
+        const result = await invoke<AgentTurnResponse>("run_agent_turn", {
+          request: {
+            baseUrl: baseUrl.value,
+            model: model.value,
+            workspaceId: selectedWorkspaceId,
+            runId: activeRunId,
+            userPrompt,
+            history: fallbackHistory,
+          },
+        });
+
+        reconcileActiveRunMessages(result.messages);
+        setStatus(
+          formatJson({
+            done_reason: result.done_reason,
+            tool_iteration_count: result.tool_iteration_count,
+            appended_messages: result.messages.length,
+            fallback: "non_streaming",
+          }),
+        );
+      } catch (fallbackError) {
+        const fallbackMessage =
+          fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+        setStatus(fallbackMessage);
+      }
+    } else {
+      removeEmptyActiveAssistantMessages();
+      setStatus(message.includes("agent run cancelled") ? "Run cancelled." : message);
+    }
   } finally {
     isRunning = false;
     activeRunId = null;
+    activeRunHadModelEvents = false;
+    activeRunMessageIds.clear();
+    activeRunAssistantMessageIds.clear();
     updateReadyState();
     promptInput.focus();
   }

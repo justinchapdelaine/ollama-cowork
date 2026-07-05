@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use crate::core::agent::{
-    assistant_message_from_response, run_agent_turn as run_agent_turn_core, AgentTurnRequest,
+    assistant_message_from_response, run_agent_turn as run_agent_turn_core,
+    run_agent_turn_streaming as run_agent_turn_streaming_core, AgentRunEvent, AgentTurnRequest,
     AgentTurnResponse,
 };
 use crate::core::messages::{ConversationMessage, MessagePart, MessageRole, ToolCall, ToolResult};
@@ -14,6 +15,8 @@ use crate::core::model::{
 use crate::core::run::{AgentRunStore, CancellationFlag};
 use crate::core::tools::{LocalToolRegistry, ToolExecutionRequest, ToolRegistry};
 use crate::core::workspace::{WorkspaceContext, WorkspaceSelection, WorkspaceSelectionStore};
+
+const AGENT_RUN_EVENT: &str = "agent-run-event";
 
 #[tauri::command]
 pub async fn probe_ollama(base_url: String) -> Result<ProbeOllamaResponse, String> {
@@ -169,6 +172,65 @@ pub async fn run_agent_turn(
 }
 
 #[tauri::command]
+pub async fn run_agent_turn_stream(
+    app: AppHandle,
+    request: AgentTurnCommandRequest,
+    selections: State<'_, WorkspaceSelectionStore>,
+    runs: State<'_, AgentRunStore>,
+) -> Result<AgentTurnResponse, String> {
+    let config = OllamaConfig::new(request.base_url).map_err(|err| err.to_string())?;
+    let backend = OllamaBackend::new(config).map_err(|err| err.to_string())?;
+    let workspace = selections
+        .get(request.workspace_id)
+        .map_err(|err| err.to_string())?;
+    let tools = LocalToolRegistry::new(workspace);
+    let cancellation = runs.begin(request.run_id).map_err(|err| err.to_string())?;
+    let run_id = request.run_id;
+    let mut emit_event = |event: AgentRunEvent| {
+        app.emit(AGENT_RUN_EVENT, AgentRunEventEnvelope { run_id, event })
+            .map_err(|err| crate::core::error::AppError::Runtime(err.to_string()))
+    };
+
+    let result = run_agent_turn_streaming_core(
+        &backend,
+        &tools,
+        AgentTurnRequest {
+            model: request.model,
+            history: request.history,
+            user_prompt: request.user_prompt,
+            tools: tools.definitions(),
+        },
+        cancellation,
+        &mut emit_event,
+    )
+    .await;
+    let finish_result = runs.finish(run_id);
+
+    match (&result, &finish_result) {
+        (Err(crate::core::error::AppError::Cancelled), _) => {
+            let _ = emit_event(AgentRunEvent::Cancelled);
+        }
+        (Err(err), _) => {
+            let _ = emit_event(AgentRunEvent::Error {
+                message: err.to_string(),
+            });
+        }
+        (Ok(_), Err(err)) => {
+            let _ = emit_event(AgentRunEvent::Error {
+                message: err.to_string(),
+            });
+        }
+        (Ok(_), Ok(())) => {}
+    }
+
+    match (result, finish_result) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Err(err), _) => Err(err.to_string()),
+        (Ok(_), Err(err)) => Err(err.to_string()),
+    }
+}
+
+#[tauri::command]
 pub async fn cancel_agent_run(
     run_id: Uuid,
     runs: State<'_, AgentRunStore>,
@@ -185,6 +247,13 @@ pub struct AgentTurnCommandRequest {
     pub run_id: Uuid,
     pub user_prompt: String,
     pub history: Vec<ConversationMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunEventEnvelope {
+    pub run_id: Uuid,
+    pub event: AgentRunEvent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

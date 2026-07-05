@@ -1,7 +1,9 @@
 use crate::core::context::ContextBuilder;
 use crate::core::error::{AppError, AppResult};
 use crate::core::messages::{ConversationMessage, MessagePart, MessageRole, ToolResult};
-use crate::core::model::{ChatRequest, ChatResponse, ModelBackend, ThinkMode, ToolDefinition};
+use crate::core::model::{
+    ChatRequest, ChatResponse, ChatStreamEvent, ModelBackend, ThinkMode, ToolDefinition,
+};
 use crate::core::run::CancellationFlag;
 use crate::core::tools::{ToolExecutionRequest, ToolRegistry};
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,40 @@ pub struct AgentTurnResponse {
     pub messages: Vec<ConversationMessage>,
     pub done_reason: Option<String>,
     pub tool_iteration_count: usize,
+}
+
+pub type AgentRunEventSink<'a> = dyn FnMut(AgentRunEvent) -> AppResult<()> + Send + 'a;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentRunEvent {
+    MessageAppended {
+        message: ConversationMessage,
+    },
+    AssistantStarted {
+        message: ConversationMessage,
+    },
+    ThinkingDelta {
+        message_id: Uuid,
+        text: String,
+    },
+    ContentDelta {
+        message_id: Uuid,
+        text: String,
+    },
+    ToolCall {
+        message_id: Uuid,
+        call: crate::core::messages::ToolCall,
+    },
+    Completed {
+        done_reason: Option<String>,
+        tool_iteration_count: usize,
+        appended_messages: usize,
+    },
+    Cancelled,
+    Error {
+        message: String,
+    },
 }
 
 pub async fn run_agent_turn(
@@ -132,7 +168,166 @@ pub async fn run_agent_turn(
     })
 }
 
+pub async fn run_agent_turn_streaming(
+    backend: &dyn ModelBackend,
+    tool_registry: &dyn ToolRegistry,
+    request: AgentTurnRequest,
+    cancellation: CancellationFlag,
+    on_event: &mut AgentRunEventSink<'_>,
+) -> AppResult<AgentTurnResponse> {
+    if request.user_prompt.trim().is_empty() {
+        return Err(AppError::InvalidConfig(
+            "user prompt cannot be empty".to_string(),
+        ));
+    }
+
+    let system = ConversationMessage {
+        id: Uuid::new_v4(),
+        role: MessageRole::System,
+        parts: vec![MessagePart::Text {
+            text: "You are Ollama Cowork, a local-first coding assistant. The selected workspace root is represented by relative path \".\". Use only workspace-relative paths in tool calls. Prefer read-only tools until the user approves write or command capabilities. Keep answers concise and cite paths you inspected."
+                .to_string(),
+        }],
+    };
+    let user = ConversationMessage {
+        id: Uuid::new_v4(),
+        role: MessageRole::User,
+        parts: vec![MessagePart::Text {
+            text: request.user_prompt,
+        }],
+    };
+
+    let mut conversation = vec![system];
+    conversation.extend(ContextBuilder::default().build_model_history(request.history));
+    conversation.push(user.clone());
+
+    let mut messages = vec![user.clone()];
+    on_event(AgentRunEvent::MessageAppended { message: user })?;
+
+    let done_reason;
+    let mut tool_iteration_count = 0;
+
+    loop {
+        cancellation.check()?;
+
+        let assistant_id = Uuid::new_v4();
+        let assistant_started = ConversationMessage {
+            id: assistant_id,
+            role: MessageRole::Assistant,
+            parts: Vec::new(),
+        };
+        on_event(AgentRunEvent::AssistantStarted {
+            message: assistant_started,
+        })?;
+
+        let chat_request = ChatRequest {
+            model: request.model.clone(),
+            messages: conversation.clone(),
+            tools: request.tools.clone(),
+            think: ThinkMode::Enabled(true),
+        };
+        let mut stream_events = |event: ChatStreamEvent| -> AppResult<()> {
+            match event {
+                ChatStreamEvent::ThinkingDelta { text } => {
+                    on_event(AgentRunEvent::ThinkingDelta {
+                        message_id: assistant_id,
+                        text,
+                    })?;
+                }
+                ChatStreamEvent::ContentDelta { text } => {
+                    on_event(AgentRunEvent::ContentDelta {
+                        message_id: assistant_id,
+                        text,
+                    })?;
+                }
+                ChatStreamEvent::ToolCall { call } => {
+                    on_event(AgentRunEvent::ToolCall {
+                        message_id: assistant_id,
+                        call,
+                    })?;
+                }
+            }
+
+            Ok(())
+        };
+        let response = tokio::select! {
+            response = backend.chat_stream(chat_request, &mut stream_events) => response?,
+            _ = cancellation.cancelled() => return Err(AppError::Cancelled),
+        };
+        let response_done_reason = response.done_reason.clone();
+        let tool_calls = response.tool_calls.clone();
+        let assistant = assistant_message_from_response_with_id(assistant_id, response);
+
+        conversation.push(assistant.clone());
+        messages.push(assistant);
+
+        if tool_calls.is_empty() {
+            done_reason = response_done_reason;
+            break;
+        }
+
+        if tool_iteration_count >= MAX_TOOL_ITERATIONS {
+            return Err(AppError::Runtime(format!(
+                "agent exceeded maximum tool iterations ({MAX_TOOL_ITERATIONS})"
+            )));
+        }
+        tool_iteration_count += 1;
+
+        for call in tool_calls {
+            cancellation.check()?;
+            let result = match tool_registry
+                .execute(
+                    ToolExecutionRequest {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    },
+                    cancellation.clone(),
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(err) => ToolResult {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    content: serde_json::json!({
+                        "error": err.to_string(),
+                    }),
+                },
+            };
+            let tool = ConversationMessage {
+                id: Uuid::new_v4(),
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult { result }],
+            };
+
+            conversation.push(tool.clone());
+            messages.push(tool.clone());
+            on_event(AgentRunEvent::MessageAppended { message: tool })?;
+        }
+    }
+
+    on_event(AgentRunEvent::Completed {
+        done_reason: done_reason.clone(),
+        tool_iteration_count,
+        appended_messages: messages.len(),
+    })?;
+
+    Ok(AgentTurnResponse {
+        messages,
+        done_reason,
+        tool_iteration_count,
+    })
+}
+
 pub fn assistant_message_from_response(response: ChatResponse) -> ConversationMessage {
+    assistant_message_from_response_with_id(Uuid::new_v4(), response)
+}
+
+fn assistant_message_from_response_with_id(
+    id: Uuid,
+    response: ChatResponse,
+) -> ConversationMessage {
     let mut parts = Vec::new();
 
     if let Some(thinking) = response.thinking {
@@ -148,7 +343,7 @@ pub fn assistant_message_from_response(response: ChatResponse) -> ConversationMe
     }
 
     ConversationMessage {
-        id: Uuid::new_v4(),
+        id,
         role: MessageRole::Assistant,
         parts,
     }
@@ -264,5 +459,53 @@ mod tests {
         .expect_err("pre-cancelled run should fail");
 
         assert!(matches!(err, AppError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn streaming_agent_turn_emits_incremental_events() {
+        let mut events = Vec::new();
+        let mut event_sink = |event| {
+            events.push(event);
+            Ok(())
+        };
+
+        let response = run_agent_turn_streaming(
+            &FakeBackend::default(),
+            &FakeTools,
+            AgentTurnRequest {
+                model: "test".to_string(),
+                history: Vec::new(),
+                user_prompt: "List files".to_string(),
+                tools: Vec::new(),
+            },
+            CancellationFlag::default(),
+            &mut event_sink,
+        )
+        .await
+        .expect("streaming agent turn");
+
+        assert_eq!(response.tool_iteration_count, 1);
+        assert_eq!(response.messages.len(), 4);
+        assert!(matches!(
+            events.first(),
+            Some(AgentRunEvent::MessageAppended { message }) if matches!(message.role, MessageRole::User)
+        ));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentRunEvent::ThinkingDelta { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentRunEvent::ToolCall { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentRunEvent::ContentDelta { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(AgentRunEvent::Completed {
+                tool_iteration_count: 1,
+                appended_messages: 4,
+                ..
+            })
+        ));
     }
 }

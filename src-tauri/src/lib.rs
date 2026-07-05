@@ -1,7 +1,10 @@
 mod commands;
 pub mod core;
 
-use commands::{cancel_agent_run, choose_workspace, probe_ollama, run_agent_turn, run_tool_probe};
+use commands::{
+    cancel_agent_run, choose_workspace, probe_ollama, run_agent_turn, run_agent_turn_stream,
+    run_tool_probe,
+};
 use core::{run::AgentRunStore, workspace::WorkspaceSelectionStore};
 
 pub fn run() {
@@ -14,6 +17,7 @@ pub fn run() {
             choose_workspace,
             probe_ollama,
             run_agent_turn,
+            run_agent_turn_stream,
             run_tool_probe
         ])
         .run(tauri::generate_context!())

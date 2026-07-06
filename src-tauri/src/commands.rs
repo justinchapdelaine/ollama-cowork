@@ -13,6 +13,10 @@ use crate::core::model::{
     ChatRequest, ModelBackend, OllamaBackend, OllamaConfig, ProbeOllamaResponse, ThinkMode,
 };
 use crate::core::run::{AgentRunStore, CancellationFlag};
+use crate::core::session::{
+    CreateSessionRequest, JsonlSessionStore, SessionEvent, SessionId, SessionSnapshot,
+    SessionStore, SessionSummary,
+};
 use crate::core::tools::{LocalToolRegistry, ToolExecutionRequest, ToolRegistry};
 use crate::core::workspace::{WorkspaceContext, WorkspaceSelection, WorkspaceSelectionStore};
 
@@ -236,6 +240,50 @@ pub async fn cancel_agent_run(
     runs: State<'_, AgentRunStore>,
 ) -> Result<bool, String> {
     runs.cancel(run_id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn create_session(
+    request: CreateSessionRequest,
+    sessions: State<'_, JsonlSessionStore>,
+) -> Result<SessionSnapshot, String> {
+    sessions
+        .create_session(request)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn append_session_event(
+    session_id: SessionId,
+    event: SessionEvent,
+    sessions: State<'_, JsonlSessionStore>,
+) -> Result<(), String> {
+    sessions
+        .append_event(session_id, event)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn load_session(
+    session_id: SessionId,
+    sessions: State<'_, JsonlSessionStore>,
+) -> Result<SessionSnapshot, String> {
+    sessions
+        .load_session(session_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn list_sessions(
+    sessions: State<'_, JsonlSessionStore>,
+) -> Result<Vec<SessionSummary>, String> {
+    sessions
+        .list_sessions()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

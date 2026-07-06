@@ -47,6 +47,32 @@ type AgentTurnResponse = {
   tool_iteration_count: number;
 };
 
+type AgentTurnTransport = "streaming" | "non_streaming_fallback";
+
+type SessionEvent =
+  | {
+      type: "agent_turn_completed";
+      run_id: string;
+      transport: AgentTurnTransport;
+      messages: ConversationMessage[];
+      done_reason?: string;
+      tool_iteration_count: number;
+    }
+  | { type: "agent_turn_failed"; run_id: string; message: string }
+  | { type: "agent_turn_cancelled"; run_id: string };
+
+type SessionSnapshot = {
+  id: string;
+  title: string;
+  messages: ConversationMessage[];
+};
+
+type ActiveRunContext = {
+  runId: string;
+  sessionId: string;
+  workspaceId: string;
+};
+
 type AgentRunEvent =
   | { type: "message_appended"; message: ConversationMessage }
   | { type: "assistant_started"; message: ConversationMessage }
@@ -170,6 +196,7 @@ const cancelRun = document.querySelector<HTMLButtonElement>("#cancel-run");
 const toolProbeOutput = document.querySelector<HTMLPreElement>("#tool-probe-output");
 
 let selectedWorkspaceId: string | null = null;
+let activeSessionId: string | null = null;
 let isRunning = false;
 let activeRunId: string | null = null;
 let activeRunHadModelEvents = false;
@@ -185,14 +212,18 @@ function setStatus(value: string) {
 
 function updateReadyState() {
   const hasWorkspace = selectedWorkspaceId !== null;
+  const hasSession = activeSessionId !== null;
+  if (chooseWorkspace) {
+    chooseWorkspace.disabled = isRunning;
+  }
   if (toolProbe) {
     toolProbe.disabled = !hasWorkspace || isRunning;
   }
   if (promptInput) {
-    promptInput.disabled = !hasWorkspace || isRunning;
+    promptInput.disabled = !hasWorkspace || !hasSession || isRunning;
   }
   if (send) {
-    send.disabled = !hasWorkspace || isRunning;
+    send.disabled = !hasWorkspace || !hasSession || isRunning;
   }
   if (cancelRun) {
     cancelRun.disabled = !isRunning || activeRunId === null;
@@ -206,6 +237,22 @@ function roleLabel(role: MessageRole): string {
 
 function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
+}
+
+function workspaceTitle(path: string): string {
+  return path.split(/[\\/]+/).filter(Boolean).pop() ?? "Workspace session";
+}
+
+function createActiveRunContext(): ActiveRunContext | null {
+  if (!selectedWorkspaceId || !activeSessionId) {
+    return null;
+  }
+
+  return {
+    runId: crypto.randomUUID(),
+    sessionId: activeSessionId,
+    workspaceId: selectedWorkspaceId,
+  };
 }
 
 function renderConversation() {
@@ -353,6 +400,32 @@ function reconcileActiveRunMessages(messages: ConversationMessage[]) {
   renderConversation();
 }
 
+async function appendSessionEvent(sessionId: string, event: SessionEvent) {
+  await invoke("append_session_event", {
+    sessionId,
+    event,
+  });
+}
+
+async function tryAppendSessionEvent(
+  sessionId: string,
+  event: SessionEvent,
+): Promise<string | null> {
+  try {
+    await appendSessionEvent(sessionId, event);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function appendSessionEventOrStatus(sessionId: string, event: SessionEvent) {
+  const message = await tryAppendSessionEvent(sessionId, event);
+  if (message) {
+    setStatus(`Session save failed: ${message}`);
+  }
+}
+
 function removeEmptyActiveAssistantMessages() {
   if (activeRunAssistantMessageIds.size === 0) return;
 
@@ -444,21 +517,37 @@ void listen<AgentRunEventEnvelope>(AGENT_RUN_EVENT, (event) => {
 
 chooseWorkspace?.addEventListener("click", async () => {
   if (!workspaceRoot || !chooseWorkspace) return;
+  if (isRunning) {
+    setStatus("Wait for the active run to finish before switching workspaces.");
+    updateReadyState();
+    return;
+  }
 
   chooseWorkspace.disabled = true;
   try {
     const selected = await invoke<WorkspaceSelection | null>("choose_workspace");
 
     if (selected) {
+      const session = await invoke<SessionSnapshot>("create_session", {
+        request: {
+          title: workspaceTitle(selected.source_root),
+          workspaceRoot: selected.source_root,
+          baseUrl: baseUrl?.value,
+          model: model?.value,
+        },
+      });
+
       selectedWorkspaceId = selected.id;
+      activeSessionId = session.id;
       workspaceRoot.value = selected.source_root;
-      setStatus("Workspace selected. Ready for a prompt.");
+      history.splice(0, history.length, ...session.messages);
+      renderConversation();
+      setStatus("Workspace selected. Session started.");
       updateReadyState();
     }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   } finally {
-    chooseWorkspace.disabled = false;
     updateReadyState();
   }
 });
@@ -535,8 +624,15 @@ cancelRun?.addEventListener("click", async () => {
 composer?.addEventListener("submit", async (event) => {
   event.preventDefault();
 
-  if (!baseUrl || !model || !promptInput || !selectedWorkspaceId) {
+  if (!baseUrl || !model || !promptInput) {
     setStatus("Choose a workspace folder before sending a prompt.");
+    return;
+  }
+
+  const runContext = createActiveRunContext();
+  if (!runContext) {
+    setStatus("Choose a workspace folder before sending a prompt.");
+    updateReadyState();
     return;
   }
 
@@ -546,7 +642,7 @@ composer?.addEventListener("submit", async (event) => {
   }
 
   isRunning = true;
-  activeRunId = crypto.randomUUID();
+  activeRunId = runContext.runId;
   activeRunHadModelEvents = false;
   updateReadyState();
   setStatus("Running agent turn...");
@@ -557,19 +653,29 @@ composer?.addEventListener("submit", async (event) => {
       request: {
         baseUrl: baseUrl.value,
         model: model.value,
-        workspaceId: selectedWorkspaceId,
-        runId: activeRunId,
+        workspaceId: runContext.workspaceId,
+        runId: runContext.runId,
         userPrompt,
         history,
       },
     });
 
     reconcileActiveRunMessages(result.messages);
+    const sessionError = await tryAppendSessionEvent(runContext.sessionId, {
+      type: "agent_turn_completed",
+      run_id: runContext.runId,
+      transport: "streaming",
+      messages: result.messages,
+      done_reason: result.done_reason,
+      tool_iteration_count: result.tool_iteration_count,
+    });
     setStatus(
       formatJson({
         done_reason: result.done_reason,
         tool_iteration_count: result.tool_iteration_count,
         appended_messages: result.messages.length,
+        session_saved: sessionError === null,
+        ...(sessionError ? { session_error: sessionError } : {}),
       }),
     );
   } catch (error) {
@@ -583,30 +689,51 @@ composer?.addEventListener("submit", async (event) => {
           request: {
             baseUrl: baseUrl.value,
             model: model.value,
-            workspaceId: selectedWorkspaceId,
-            runId: activeRunId,
+            workspaceId: runContext.workspaceId,
+            runId: runContext.runId,
             userPrompt,
             history: fallbackHistory,
           },
         });
 
         reconcileActiveRunMessages(result.messages);
+        const sessionError = await tryAppendSessionEvent(runContext.sessionId, {
+          type: "agent_turn_completed",
+          run_id: runContext.runId,
+          transport: "non_streaming_fallback",
+          messages: result.messages,
+          done_reason: result.done_reason,
+          tool_iteration_count: result.tool_iteration_count,
+        });
         setStatus(
           formatJson({
             done_reason: result.done_reason,
             tool_iteration_count: result.tool_iteration_count,
             appended_messages: result.messages.length,
             fallback: "non_streaming",
+            session_saved: sessionError === null,
+            ...(sessionError ? { session_error: sessionError } : {}),
           }),
         );
       } catch (fallbackError) {
         const fallbackMessage =
           fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
         setStatus(fallbackMessage);
+        await appendSessionEventOrStatus(runContext.sessionId, {
+          type: "agent_turn_failed",
+          run_id: runContext.runId,
+          message: fallbackMessage,
+        });
       }
     } else {
       removeEmptyActiveAssistantMessages();
       setStatus(message.includes("agent run cancelled") ? "Run cancelled." : message);
+      await appendSessionEventOrStatus(
+        runContext.sessionId,
+        message.includes("agent run cancelled")
+          ? { type: "agent_turn_cancelled", run_id: runContext.runId }
+          : { type: "agent_turn_failed", run_id: runContext.runId, message },
+      );
     }
   } finally {
     isRunning = false;

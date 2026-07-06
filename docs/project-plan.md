@@ -51,9 +51,10 @@ This document should answer "where are we, what did we decide, and what should h
 - Ollama backend can probe `/api/version`, list `/api/tags`, and run both non-streaming and streaming `/api/chat` turns.
 - Agent loop supports thinking, tool calls, tool results, final assistant messages, bounded tool iterations, run-event streaming, and non-streaming fallback.
 - Run cancellation is tracked through a Rust `AgentRunStore`.
+- Durable session storage has an initial modular `SessionStore` boundary with a JSONL-backed local implementation for session metadata and completed/failed/cancelled agent-turn events.
 - Context compaction summarizes older history while preserving recent messages.
 - Read-only local tools support bounded file reads, file search, hidden/generated entry reporting, and cancellation checks.
-- UI renders conversation history, streaming thinking/content deltas, collapsible thinking, tool call/result blocks, status output, and responsive/narrow-window layouts.
+- UI renders conversation history, streaming thinking/content deltas, collapsible thinking, tool call/result blocks, status output, and responsive/narrow-window layouts; it creates a new durable session for each selected workspace and persists completed turns.
 - Planning docs exist for sandboxing, engineering guidelines, skills/extensions, and MCP integration.
 
 ## Recent Test Evidence
@@ -85,7 +86,8 @@ This document should answer "where are we, what did we decide, and what should h
    - Continue routing frontend updates through a run-event reducer instead of mixing transport details into rendering.
 
 2. Add durable session storage.
-   - Persist selected workspace metadata, messages, run events, tool calls, approvals, and summaries.
+   - Extend the initial JSONL session store toward full run-event/audit capture.
+   - Persist selected workspace metadata, messages, completed/failed/cancelled turns, tool calls, approvals, and summaries.
    - Make conversation reload possible.
    - Keep UI state separate from session history.
 

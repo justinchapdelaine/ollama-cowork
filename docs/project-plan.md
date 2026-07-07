@@ -2,7 +2,7 @@
 
 This is the living handoff document for Ollama Cowork. Keep it continuously updated as decisions, test results, priorities, and implementation status change. If it starts drifting from the code or conversation, update this file before relying on it for planning.
 
-Last updated: 2026-07-05
+Last updated: 2026-07-06
 
 ## Purpose
 
@@ -46,7 +46,7 @@ This document should answer "where are we, what did we decide, and what should h
 
 ## Current Implementation
 
-- Latest committed checkpoint before this document was added: `f58d7f1` on `branch/init`, `feat: add interactive agent workspace loop`.
+- Latest committed checkpoint: `ba60c3e` on `branch/init`, `feat: add durable session storage`.
 - Tauri app launches with workspace picker, Ollama settings, diagnostics, and chat UI.
 - Ollama backend can probe `/api/version`, list `/api/tags`, and run both non-streaming and streaming `/api/chat` turns.
 - Agent loop supports thinking, tool calls, tool results, final assistant messages, bounded tool iterations, run-event streaming, and non-streaming fallback.
@@ -54,7 +54,7 @@ This document should answer "where are we, what did we decide, and what should h
 - Durable session storage has an initial modular `SessionStore` boundary with a JSONL-backed local implementation for session metadata and completed/failed/cancelled agent-turn events.
 - Context compaction summarizes older history while preserving recent messages.
 - Read-only local tools support bounded file reads, file search, hidden/generated entry reporting, and cancellation checks.
-- UI renders conversation history, streaming thinking/content deltas, collapsible thinking, tool call/result blocks, status output, and responsive/narrow-window layouts; it creates a new durable session for each selected workspace and persists completed turns.
+- UI renders conversation history, streaming thinking/content deltas, collapsible thinking, tool call/result blocks, status output, recent sessions, and responsive/narrow-window layouts; it creates a new durable session for each selected workspace, persists completed turns, and can reload saved sessions.
 - Planning docs exist for sandboxing, engineering guidelines, skills/extensions, and MCP integration.
 
 ## Recent Test Evidence
@@ -70,7 +70,14 @@ This document should answer "where are we, what did we decide, and what should h
   - selected the repo workspace through the native folder picker;
   - sent a prompt through the streamed agent command;
   - verified immediate user/assistant event rendering, streamed thinking/tool call display, tool result rendering, final assistant content, and completion counters.
+- Session reload smoke test passed against the real Tauri desktop window:
+  - listed existing JSONL-backed recent sessions;
+  - loaded a saved session and restored its workspace, conversation, model, and base URL;
+  - sent a new streamed prompt from the loaded session;
+  - verified recent session controls were disabled during the active run;
+  - verified the saved session updated in the recent list and reloaded with the last-used runtime settings.
 - Verification commands passed after the latest agent-loop work:
+  - `npm.cmd test`
   - `cargo fmt -- --check`
   - `cargo test`
   - `cargo clippy --all-targets -- -D warnings`
@@ -88,7 +95,7 @@ This document should answer "where are we, what did we decide, and what should h
 2. Add durable session storage.
    - Extend the initial JSONL session store toward full run-event/audit capture.
    - Persist selected workspace metadata, messages, completed/failed/cancelled turns, tool calls, approvals, and summaries.
-   - Make conversation reload possible.
+   - Keep improving conversation reload with search, pruning, and clearer session metadata.
    - Keep UI state separate from session history.
 
 3. Build the approval/runtime scaffold.
@@ -110,7 +117,7 @@ This document should answer "where are we, what did we decide, and what should h
 
 - Improve context compaction with a structured `SessionSummary`.
 - Add streaming progress and cancellation UX polish.
-- Add session list/sidebar or recent sessions.
+- Add richer session list/sidebar controls such as search, rename, delete, and pinning.
 - Add a model picker backed by `/api/tags`.
 - Add read-only repository awareness such as Git status, file tree search, and safe source previews.
 - Add write/edit capability only through approval-gated patch proposals.

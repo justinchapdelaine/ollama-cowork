@@ -1,5 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  type AgentTurnResponse,
+  type ConversationMessage,
+  type MessageRole,
+  type SessionEvent,
+  type SessionSummary,
+  type ToolCall,
+  type ToolResult,
+  type WorkspaceSelection,
+  createSessionForWorkspace,
+  listSessions,
+  loadSession,
+  selectWorkspacePath,
+  SessionController,
+  tryAppendSessionEvent,
+} from "./session";
 import "./styles.css";
 
 type ProbeOllamaResponse = {
@@ -11,66 +27,6 @@ type ProbeOllamaResponse = {
     parameter_size?: string;
     capabilities: string[];
   }>;
-};
-
-type MessageRole = "system" | "user" | "assistant" | "tool";
-
-type ToolCall = {
-  id?: string;
-  name: string;
-  arguments: unknown;
-};
-
-type ToolResult = {
-  call_id?: string;
-  name: string;
-  content: unknown;
-};
-
-type MessagePart =
-  | { type: "thinking"; text: string }
-  | { type: "text"; text: string }
-  | { type: "tool_call"; call: ToolCall }
-  | { type: "tool_result"; result: ToolResult }
-  | { type: "approval_request"; request: unknown }
-  | { type: "diff"; diff: unknown };
-
-type ConversationMessage = {
-  id: string;
-  role: MessageRole;
-  parts: MessagePart[];
-};
-
-type AgentTurnResponse = {
-  messages: ConversationMessage[];
-  done_reason?: string;
-  tool_iteration_count: number;
-};
-
-type AgentTurnTransport = "streaming" | "non_streaming_fallback";
-
-type SessionEvent =
-  | {
-      type: "agent_turn_completed";
-      run_id: string;
-      transport: AgentTurnTransport;
-      messages: ConversationMessage[];
-      done_reason?: string;
-      tool_iteration_count: number;
-    }
-  | { type: "agent_turn_failed"; run_id: string; message: string }
-  | { type: "agent_turn_cancelled"; run_id: string };
-
-type SessionSnapshot = {
-  id: string;
-  title: string;
-  messages: ConversationMessage[];
-};
-
-type ActiveRunContext = {
-  runId: string;
-  sessionId: string;
-  workspaceId: string;
 };
 
 type AgentRunEvent =
@@ -100,11 +56,6 @@ type ToolProbeResponse = {
   final_thinking?: string;
   final_content: string;
   done_reason?: string;
-};
-
-type WorkspaceSelection = {
-  id: string;
-  source_root: string;
 };
 
 const app = document.querySelector<HTMLElement>("#app");
@@ -167,6 +118,14 @@ app.innerHTML = `
       </section>
 
       <aside class="diagnostics" aria-label="Diagnostics">
+        <article class="message recent-sessions">
+          <div class="panel-heading">
+            <h2>Recent Sessions</h2>
+            <button id="refresh-sessions" class="secondary" type="button">Refresh</button>
+          </div>
+          <div id="session-list" class="session-list">No saved sessions yet.</div>
+        </article>
+
         <article class="message">
           <h2>Status</h2>
           <pre id="output">Choose a workspace folder to start.</pre>
@@ -194,15 +153,15 @@ const promptInput = document.querySelector<HTMLTextAreaElement>("#prompt");
 const send = document.querySelector<HTMLButtonElement>("#send");
 const cancelRun = document.querySelector<HTMLButtonElement>("#cancel-run");
 const toolProbeOutput = document.querySelector<HTMLPreElement>("#tool-probe-output");
+const refreshSessions = document.querySelector<HTMLButtonElement>("#refresh-sessions");
+const sessionList = document.querySelector<HTMLElement>("#session-list");
 
-let selectedWorkspaceId: string | null = null;
-let activeSessionId: string | null = null;
+const sessions = new SessionController();
 let isRunning = false;
 let activeRunId: string | null = null;
 let activeRunHadModelEvents = false;
 const activeRunMessageIds = new Set<string>();
 const activeRunAssistantMessageIds = new Set<string>();
-const history: ConversationMessage[] = [];
 
 function setStatus(value: string) {
   if (output) {
@@ -211,8 +170,8 @@ function setStatus(value: string) {
 }
 
 function updateReadyState() {
-  const hasWorkspace = selectedWorkspaceId !== null;
-  const hasSession = activeSessionId !== null;
+  const hasWorkspace = sessions.selectedWorkspaceId !== null;
+  const hasSession = sessions.activeSessionId !== null;
   if (chooseWorkspace) {
     chooseWorkspace.disabled = isRunning;
   }
@@ -228,6 +187,12 @@ function updateReadyState() {
   if (cancelRun) {
     cancelRun.disabled = !isRunning || activeRunId === null;
   }
+  if (refreshSessions) {
+    refreshSessions.disabled = isRunning;
+  }
+  for (const button of sessionList?.querySelectorAll<HTMLButtonElement>("button") ?? []) {
+    button.disabled = isRunning;
+  }
 }
 
 function roleLabel(role: MessageRole): string {
@@ -239,27 +204,112 @@ function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function workspaceTitle(path: string): string {
-  return path.split(/[\\/]+/).filter(Boolean).pop() ?? "Workspace session";
+function formatSessionTime(value: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 
-function createActiveRunContext(): ActiveRunContext | null {
-  if (!selectedWorkspaceId || !activeSessionId) {
-    return null;
+function shortWorkspaceName(path?: string): string {
+  if (!path) return "No workspace";
+  return path.split(/[\\/]+/).filter(Boolean).pop() ?? path;
+}
+
+function renderSessionList(summaries: SessionSummary[]) {
+  if (!sessionList) return;
+
+  sessionList.replaceChildren();
+  if (summaries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "session-empty";
+    empty.textContent = "No saved sessions yet.";
+    sessionList.append(empty);
+    return;
   }
 
-  return {
-    runId: crypto.randomUUID(),
-    sessionId: activeSessionId,
-    workspaceId: selectedWorkspaceId,
-  };
+  for (const summary of summaries) {
+    const button = document.createElement("button");
+    button.className = "session-item";
+    button.type = "button";
+    button.dataset.sessionId = summary.id;
+
+    const title = document.createElement("span");
+    title.className = "session-title";
+    title.textContent = summary.title || shortWorkspaceName(summary.workspaceRoot);
+
+    const meta = document.createElement("span");
+    meta.className = "session-meta";
+    meta.textContent = `${shortWorkspaceName(summary.workspaceRoot)} - ${summary.messageCount} messages - ${formatSessionTime(summary.updatedAtMs)}`;
+
+    button.append(title, meta);
+    sessionList.append(button);
+  }
+
+  updateReadyState();
+}
+
+async function refreshSessionList() {
+  if (!sessionList) return;
+
+  sessionList.textContent = "Loading sessions...";
+  try {
+    renderSessionList(await listSessions());
+  } catch (error) {
+    sessionList.textContent = `Could not load sessions: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  } finally {
+    updateReadyState();
+  }
+}
+
+function syncActiveSessionFields() {
+  if (workspaceRoot && sessions.selectedWorkspaceRoot) {
+    workspaceRoot.value = sessions.selectedWorkspaceRoot;
+  }
+  if (baseUrl && sessions.baseUrl) {
+    baseUrl.value = sessions.baseUrl;
+  }
+  if (model && sessions.model) {
+    model.value = sessions.model;
+  }
+}
+
+async function loadExistingSession(sessionId: string) {
+  if (isRunning) {
+    setStatus("Wait for the active run to finish before loading a session.");
+    updateReadyState();
+    return;
+  }
+
+  setStatus("Loading session...");
+  try {
+    const session = await loadSession(sessionId);
+    if (!session.workspaceRoot) {
+      throw new Error("saved session does not include a workspace root");
+    }
+    const workspace = await selectWorkspacePath(session.workspaceRoot);
+
+    sessions.activateSession(session, workspace);
+    syncActiveSessionFields();
+    renderConversation();
+    setStatus(`Loaded session: ${session.title}`);
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    await refreshSessionList();
+    updateReadyState();
+  }
 }
 
 function renderConversation() {
   if (!conversation) return;
 
   conversation.replaceChildren();
-  const visibleMessages = history.filter((message) => message.role !== "system");
+  const visibleMessages = sessions.messages.filter((message) => message.role !== "system");
 
   if (visibleMessages.length === 0) {
     const empty = document.createElement("article");
@@ -344,34 +394,6 @@ function renderToolBlock(title: string, value: unknown): HTMLElement {
   return details;
 }
 
-function findMessage(messageId: string): ConversationMessage | undefined {
-  return history.find((message) => message.id === messageId);
-}
-
-function appendTextPart(
-  messageId: string,
-  type: "thinking" | "text",
-  text: string,
-) {
-  const message = findMessage(messageId);
-  if (!message) return;
-
-  const existing = message.parts.find((part) => part.type === type);
-  if (existing?.type === type) {
-    existing.text += text;
-    return;
-  }
-
-  message.parts.push({ type, text });
-}
-
-function appendToolCall(messageId: string, call: ToolCall) {
-  const message = findMessage(messageId);
-  if (!message) return;
-
-  message.parts.push({ type: "tool_call", call });
-}
-
 function trackActiveRunMessage(message: ConversationMessage) {
   activeRunMessageIds.add(message.id);
   if (message.role === "assistant") {
@@ -380,43 +402,14 @@ function trackActiveRunMessage(message: ConversationMessage) {
 }
 
 function removeActiveRunMessages() {
-  if (activeRunMessageIds.size === 0) return false;
-
-  const originalLength = history.length;
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    if (activeRunMessageIds.has(history[index].id)) {
-      history.splice(index, 1);
-    }
-  }
-
-  return history.length !== originalLength;
+  return sessions.removeMessagesById(activeRunMessageIds);
 }
 
 function reconcileActiveRunMessages(messages: ConversationMessage[]) {
-  removeActiveRunMessages();
-  history.push(...messages);
+  sessions.reconcileRunMessages(activeRunMessageIds, messages);
   activeRunMessageIds.clear();
   activeRunAssistantMessageIds.clear();
   renderConversation();
-}
-
-async function appendSessionEvent(sessionId: string, event: SessionEvent) {
-  await invoke("append_session_event", {
-    sessionId,
-    event,
-  });
-}
-
-async function tryAppendSessionEvent(
-  sessionId: string,
-  event: SessionEvent,
-): Promise<string | null> {
-  try {
-    await appendSessionEvent(sessionId, event);
-    return null;
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
 }
 
 async function appendSessionEventOrStatus(sessionId: string, event: SessionEvent) {
@@ -427,21 +420,7 @@ async function appendSessionEventOrStatus(sessionId: string, event: SessionEvent
 }
 
 function removeEmptyActiveAssistantMessages() {
-  if (activeRunAssistantMessageIds.size === 0) return;
-
-  const originalLength = history.length;
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const message = history[index];
-    if (
-      message.role === "assistant" &&
-      message.parts.length === 0 &&
-      activeRunAssistantMessageIds.has(message.id)
-    ) {
-      history.splice(index, 1);
-    }
-  }
-
-  if (history.length !== originalLength) {
+  if (sessions.removeEmptyAssistantMessages(activeRunAssistantMessageIds)) {
     renderConversation();
   }
 }
@@ -453,35 +432,35 @@ function applyAgentRunEvent(envelope: AgentRunEventEnvelope) {
 
   if (event.type === "assistant_started") {
     trackActiveRunMessage(event.message);
-    history.push(event.message);
+    sessions.appendMessage(event.message);
     renderConversation();
     return;
   }
 
   if (event.type === "message_appended") {
     trackActiveRunMessage(event.message);
-    history.push(event.message);
+    sessions.appendMessage(event.message);
     renderConversation();
     return;
   }
 
   if (event.type === "thinking_delta") {
     activeRunHadModelEvents = true;
-    appendTextPart(event.message_id, "thinking", event.text);
+    sessions.appendTextPart(event.message_id, "thinking", event.text);
     renderConversation();
     return;
   }
 
   if (event.type === "content_delta") {
     activeRunHadModelEvents = true;
-    appendTextPart(event.message_id, "text", event.text);
+    sessions.appendTextPart(event.message_id, "text", event.text);
     renderConversation();
     return;
   }
 
   if (event.type === "tool_call") {
     activeRunHadModelEvents = true;
-    appendToolCall(event.message_id, event.call);
+    sessions.appendToolCall(event.message_id, event.call);
     renderConversation();
     return;
   }
@@ -515,6 +494,17 @@ void listen<AgentRunEventEnvelope>(AGENT_RUN_EVENT, (event) => {
   applyAgentRunEvent(event.payload);
 });
 
+refreshSessions?.addEventListener("click", () => {
+  void refreshSessionList();
+});
+
+sessionList?.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-session-id]");
+  if (!button?.dataset.sessionId) return;
+
+  void loadExistingSession(button.dataset.sessionId);
+});
+
 chooseWorkspace?.addEventListener("click", async () => {
   if (!workspaceRoot || !chooseWorkspace) return;
   if (isRunning) {
@@ -528,21 +518,13 @@ chooseWorkspace?.addEventListener("click", async () => {
     const selected = await invoke<WorkspaceSelection | null>("choose_workspace");
 
     if (selected) {
-      const session = await invoke<SessionSnapshot>("create_session", {
-        request: {
-          title: workspaceTitle(selected.source_root),
-          workspaceRoot: selected.source_root,
-          baseUrl: baseUrl?.value,
-          model: model?.value,
-        },
-      });
+      const session = await createSessionForWorkspace(selected, baseUrl?.value, model?.value);
 
-      selectedWorkspaceId = selected.id;
-      activeSessionId = session.id;
-      workspaceRoot.value = selected.source_root;
-      history.splice(0, history.length, ...session.messages);
+      sessions.activateSession(session, selected);
+      syncActiveSessionFields();
       renderConversation();
       setStatus("Workspace selected. Session started.");
+      await refreshSessionList();
       updateReadyState();
     }
   } catch (error) {
@@ -571,7 +553,8 @@ probe?.addEventListener("click", async () => {
 });
 
 toolProbe?.addEventListener("click", async () => {
-  if (!baseUrl || !model || !toolProbeOutput || !selectedWorkspaceId) {
+  const workspaceId = sessions.selectedWorkspaceId;
+  if (!baseUrl || !model || !toolProbeOutput || !workspaceId) {
     setStatus("Choose a workspace folder before running the tool probe.");
     return;
   }
@@ -584,7 +567,7 @@ toolProbe?.addEventListener("click", async () => {
     const result = await invoke<ToolProbeResponse>("run_tool_probe", {
       baseUrl: baseUrl.value,
       model: model.value,
-      workspaceId: selectedWorkspaceId,
+      workspaceId,
     });
 
     toolProbeOutput.textContent = formatJson({
@@ -629,7 +612,7 @@ composer?.addEventListener("submit", async (event) => {
     return;
   }
 
-  const runContext = createActiveRunContext();
+  const runContext = sessions.createRunContext();
   if (!runContext) {
     setStatus("Choose a workspace folder before sending a prompt.");
     updateReadyState();
@@ -656,7 +639,7 @@ composer?.addEventListener("submit", async (event) => {
         workspaceId: runContext.workspaceId,
         runId: runContext.runId,
         userPrompt,
-        history,
+        history: sessions.messages,
       },
     });
 
@@ -665,6 +648,8 @@ composer?.addEventListener("submit", async (event) => {
       type: "agent_turn_completed",
       run_id: runContext.runId,
       transport: "streaming",
+      base_url: baseUrl.value,
+      model: model.value,
       messages: result.messages,
       done_reason: result.done_reason,
       tool_iteration_count: result.tool_iteration_count,
@@ -682,7 +667,7 @@ composer?.addEventListener("submit", async (event) => {
     const message = error instanceof Error ? error.message : String(error);
     if (!activeRunHadModelEvents && !message.includes("agent run cancelled")) {
       try {
-        const fallbackHistory = history.filter(
+        const fallbackHistory = sessions.messages.filter(
           (message) => !activeRunMessageIds.has(message.id),
         );
         const result = await invoke<AgentTurnResponse>("run_agent_turn", {
@@ -701,6 +686,8 @@ composer?.addEventListener("submit", async (event) => {
           type: "agent_turn_completed",
           run_id: runContext.runId,
           transport: "non_streaming_fallback",
+          base_url: baseUrl.value,
+          model: model.value,
           messages: result.messages,
           done_reason: result.done_reason,
           tool_iteration_count: result.tool_iteration_count,
@@ -742,9 +729,11 @@ composer?.addEventListener("submit", async (event) => {
     activeRunMessageIds.clear();
     activeRunAssistantMessageIds.clear();
     updateReadyState();
+    void refreshSessionList();
     promptInput.focus();
   }
 });
 
 renderConversation();
 updateReadyState();
+void refreshSessionList();

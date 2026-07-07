@@ -38,6 +38,12 @@ button {
   text-align: center;
 }
 
+button.secondary {
+  border-color: #c2c7cf;
+  background: #fff;
+  color: #202124;
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;
@@ -102,6 +108,23 @@ h2 {
 
 .panel {
   margin-bottom: 14px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.panel-heading h2 {
+  margin-bottom: 0;
+}
+
+.panel-heading button {
+  min-height: 32px;
+  padding: 0 10px;
 }
 
 .settings-panel {
@@ -301,6 +324,41 @@ details + details {
   min-height: 0;
   max-height: 100%;
   overflow: auto;
+}
+
+.session-list {
+  display: grid;
+  gap: 8px;
+}
+
+.session-item {
+  display: grid;
+  justify-content: stretch;
+  width: 100%;
+  min-height: 0;
+  padding: 10px;
+  border-color: #d7dbe2;
+  background: #f9fafb;
+  color: #202124;
+  text-align: left;
+}
+
+.session-title {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta,
+.session-empty {
+  color: #5f6368;
+  font-size: 0.82rem;
+}
+
+.session-empty {
+  margin: 0;
 }
 
 .thinking-block,

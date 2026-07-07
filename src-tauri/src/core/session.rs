@@ -238,6 +238,8 @@ pub enum SessionEvent {
     AgentTurnCompleted {
         run_id: Uuid,
         transport: AgentTurnTransport,
+        base_url: Option<String>,
+        model: Option<String>,
         messages: Vec<ConversationMessage>,
         done_reason: Option<String>,
         tool_iteration_count: usize,
@@ -277,7 +279,19 @@ struct SessionCreatedRecord {
 }
 
 fn apply_event(snapshot: &mut SessionSnapshot, event: SessionEvent, at_ms: u64) {
-    if let SessionEvent::AgentTurnCompleted { messages, .. } = &event {
+    if let SessionEvent::AgentTurnCompleted {
+        base_url,
+        model,
+        messages,
+        ..
+    } = &event
+    {
+        if let Some(base_url) = base_url {
+            snapshot.base_url = Some(base_url.clone());
+        }
+        if let Some(model) = model {
+            snapshot.model = Some(model.clone());
+        }
         snapshot.messages.extend(messages.iter().cloned());
     }
 
@@ -321,6 +335,8 @@ mod tests {
                 SessionEvent::AgentTurnCompleted {
                     run_id: Uuid::new_v4(),
                     transport: AgentTurnTransport::Streaming,
+                    base_url: Some("http://127.0.0.1:11434".to_string()),
+                    model: Some("updated-model".to_string()),
                     messages: vec![message.clone()],
                     done_reason: Some("stop".to_string()),
                     tool_iteration_count: 0,
@@ -332,6 +348,8 @@ mod tests {
         let loaded = store.load_session(session.id).await.expect("load session");
 
         assert_eq!(loaded.title, "Test session");
+        assert_eq!(loaded.base_url.as_deref(), Some("http://127.0.0.1:11434"));
+        assert_eq!(loaded.model.as_deref(), Some("updated-model"));
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].id, message.id);
         assert_eq!(loaded.events.len(), 1);

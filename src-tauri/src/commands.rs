@@ -49,6 +49,15 @@ pub async fn choose_workspace(
 }
 
 #[tauri::command]
+pub async fn select_workspace_path(
+    source_root: String,
+    selections: State<'_, WorkspaceSelectionStore>,
+) -> Result<WorkspaceSelection, String> {
+    let workspace = WorkspaceContext::new(source_root).map_err(|err| err.to_string())?;
+    selections.insert(workspace).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub async fn run_tool_probe(
     base_url: String,
     model: String,

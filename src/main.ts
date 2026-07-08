@@ -4,14 +4,17 @@ import {
   type AgentTurnResponse,
   type ConversationMessage,
   type MessageRole,
+  type PendingApproval,
   type SessionEvent,
   type SessionSummary,
   type ToolCall,
   type ToolResult,
   type WorkspaceSelection,
   createSessionForWorkspace,
+  listPendingApprovals,
   listSessions,
   loadSession,
+  resolveApproval,
   selectWorkspacePath,
   SessionController,
   tryAppendSessionEvent,
@@ -126,6 +129,14 @@ app.innerHTML = `
           <div id="session-list" class="session-list">No saved sessions yet.</div>
         </article>
 
+        <article class="message pending-approvals">
+          <div class="panel-heading">
+            <h2>Pending Approvals</h2>
+            <button id="refresh-approvals" class="secondary" type="button">Refresh</button>
+          </div>
+          <div id="approval-list" class="approval-list">No pending approvals.</div>
+        </article>
+
         <article class="message">
           <h2>Status</h2>
           <pre id="output">Choose a workspace folder to start.</pre>
@@ -155,6 +166,8 @@ const cancelRun = document.querySelector<HTMLButtonElement>("#cancel-run");
 const toolProbeOutput = document.querySelector<HTMLPreElement>("#tool-probe-output");
 const refreshSessions = document.querySelector<HTMLButtonElement>("#refresh-sessions");
 const sessionList = document.querySelector<HTMLElement>("#session-list");
+const refreshApprovals = document.querySelector<HTMLButtonElement>("#refresh-approvals");
+const approvalList = document.querySelector<HTMLElement>("#approval-list");
 
 const sessions = new SessionController();
 let isRunning = false;
@@ -266,6 +279,84 @@ async function refreshSessionList() {
   }
 }
 
+function renderApprovalList(approvals: PendingApproval[]) {
+  if (!approvalList) return;
+
+  approvalList.replaceChildren();
+  if (approvals.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "session-empty";
+    empty.textContent = "No pending approvals.";
+    approvalList.append(empty);
+    return;
+  }
+
+  for (const approval of approvals) {
+    const item = document.createElement("article");
+    item.className = "approval-item";
+    item.dataset.requestId = approval.request.id;
+
+    const title = document.createElement("div");
+    title.className = "approval-title";
+    title.textContent = approval.request.summary;
+
+    const meta = document.createElement("div");
+    meta.className = "approval-meta";
+    meta.textContent = `${approval.request.requestedCapabilities.join(", ")} - ${formatSessionTime(approval.createdAtMs)}`;
+
+    const reason = document.createElement("p");
+    reason.className = "approval-reason";
+    reason.textContent = approval.request.reason;
+
+    const actions = document.createElement("div");
+    actions.className = "approval-actions";
+
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.dataset.approvalAction = "approve";
+    approve.textContent = "Approve";
+
+    const deny = document.createElement("button");
+    deny.type = "button";
+    deny.className = "secondary";
+    deny.dataset.approvalAction = "deny";
+    deny.textContent = "Deny";
+
+    actions.append(approve, deny);
+    item.append(title, meta, reason, actions);
+    approvalList.append(item);
+  }
+}
+
+async function refreshApprovalList() {
+  if (!approvalList) return;
+
+  approvalList.textContent = "Loading approvals...";
+  try {
+    renderApprovalList(await listPendingApprovals());
+  } catch (error) {
+    approvalList.textContent = `Could not load approvals: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+}
+
+async function resolvePendingApproval(requestId: string, approved: boolean) {
+  setStatus(approved ? "Approving request..." : "Denying request...");
+  try {
+    await resolveApproval(
+      requestId,
+      approved,
+      approved ? "Approved by user." : "Denied by user.",
+    );
+    setStatus(approved ? "Approval granted." : "Approval denied.");
+    await refreshApprovalList();
+    await refreshSessionList();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  }
+}
+
 function syncActiveSessionFields() {
   if (workspaceRoot && sessions.selectedWorkspaceRoot) {
     workspaceRoot.value = sessions.selectedWorkspaceRoot;
@@ -366,6 +457,21 @@ function renderMessage(message: ConversationMessage): HTMLElement {
 
     if (part.type === "tool_result") {
       article.append(renderToolBlock(`Tool Result: ${part.result.name}`, part.result.content));
+      continue;
+    }
+
+    if (part.type === "approval_request") {
+      article.append(renderToolBlock("Approval Request", part.request));
+      continue;
+    }
+
+    if (part.type === "approval_decision") {
+      article.append(
+        renderToolBlock(
+          part.decision.approved ? "Approval Granted" : "Approval Denied",
+          part.decision,
+        ),
+      );
     }
   }
 
@@ -496,6 +602,21 @@ void listen<AgentRunEventEnvelope>(AGENT_RUN_EVENT, (event) => {
 
 refreshSessions?.addEventListener("click", () => {
   void refreshSessionList();
+});
+
+refreshApprovals?.addEventListener("click", () => {
+  void refreshApprovalList();
+});
+
+approvalList?.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+    "button[data-approval-action]",
+  );
+  const item = button?.closest<HTMLElement>("[data-request-id]");
+  const requestId = item?.dataset.requestId;
+  if (!button?.dataset.approvalAction || !requestId) return;
+
+  void resolvePendingApproval(requestId, button.dataset.approvalAction === "approve");
 });
 
 sessionList?.addEventListener("click", (event) => {
@@ -737,3 +858,4 @@ composer?.addEventListener("submit", async (event) => {
 renderConversation();
 updateReadyState();
 void refreshSessionList();
+void refreshApprovalList();

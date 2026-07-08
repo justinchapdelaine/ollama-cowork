@@ -372,7 +372,9 @@ pub(crate) fn to_ollama_message(message: crate::core::messages::ConversationMess
                 tool_name = Some(result.name);
                 content.push_str(&result.content.to_string());
             }
-            MessagePart::ApprovalRequest { .. } | MessagePart::Diff { .. } => {}
+            MessagePart::ApprovalRequest { .. }
+            | MessagePart::ApprovalDecision { .. }
+            | MessagePart::Diff { .. } => {}
         }
     }
 

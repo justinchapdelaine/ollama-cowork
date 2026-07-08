@@ -120,8 +120,22 @@ fn summarize_message(message: &ConversationMessage) -> String {
             }
             MessagePart::ApprovalRequest { request } => {
                 parts.push(format!(
-                    "approval requested for {}: {}",
-                    request.requested_capability, request.summary
+                    "approval requested for {}: {} ({})",
+                    request.requested_capabilities.join(", "),
+                    request.summary,
+                    request.reason
+                ));
+            }
+            MessagePart::ApprovalDecision { decision } => {
+                parts.push(format!(
+                    "approval {} by {}: {}",
+                    if decision.approved {
+                        "approved"
+                    } else {
+                        "denied"
+                    },
+                    decision.reviewer,
+                    decision.reason
                 ));
             }
             MessagePart::Diff { diff } => {

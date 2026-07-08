@@ -26,6 +26,7 @@ pub enum MessagePart {
     ToolCall { call: ToolCall },
     ToolResult { result: ToolResult },
     ApprovalRequest { request: ApprovalRequestMessage },
+    ApprovalDecision { decision: ApprovalDecisionMessage },
     Diff { diff: DiffMessage },
 }
 
@@ -44,9 +45,22 @@ pub struct ToolResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApprovalRequestMessage {
+    pub id: Uuid,
     pub summary: String,
-    pub requested_capability: String,
+    pub requested_capabilities: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalDecisionMessage {
+    pub id: Uuid,
+    pub request_id: Uuid,
+    pub approved: bool,
+    pub reviewer: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

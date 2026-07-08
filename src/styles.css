@@ -331,6 +331,11 @@ details + details {
   gap: 8px;
 }
 
+.approval-list {
+  display: grid;
+  gap: 10px;
+}
+
 .session-item {
   display: grid;
   justify-content: stretch;
@@ -359,6 +364,40 @@ details + details {
 
 .session-empty {
   margin: 0;
+}
+
+.approval-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d7dbe2;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.approval-title {
+  font-weight: 700;
+}
+
+.approval-meta,
+.approval-reason {
+  color: #5f6368;
+  font-size: 0.82rem;
+}
+
+.approval-reason {
+  margin: 0;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.approval-actions button {
+  min-height: 32px;
+  padding: 0 10px;
 }
 
 .thinking-block,

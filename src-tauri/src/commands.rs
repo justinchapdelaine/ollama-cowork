@@ -8,6 +8,7 @@ use crate::core::agent::{
     run_agent_turn_streaming as run_agent_turn_streaming_core, AgentRunEvent, AgentTurnRequest,
     AgentTurnResponse,
 };
+use crate::core::approval::{ApprovalRequestStore, PendingApproval, ResolvedApproval};
 use crate::core::messages::{ConversationMessage, MessagePart, MessageRole, ToolCall, ToolResult};
 use crate::core::model::{
     ChatRequest, ModelBackend, OllamaBackend, OllamaConfig, ProbeOllamaResponse, ThinkMode,
@@ -17,7 +18,9 @@ use crate::core::session::{
     CreateSessionRequest, JsonlSessionStore, SessionEvent, SessionId, SessionSnapshot,
     SessionStore, SessionSummary,
 };
-use crate::core::tools::{LocalToolRegistry, ToolExecutionRequest, ToolRegistry};
+use crate::core::tools::{
+    LocalToolRegistry, PolicyEnforcedToolRegistry, ToolExecutionRequest, ToolRegistry,
+};
 use crate::core::workspace::{WorkspaceContext, WorkspaceSelection, WorkspaceSelectionStore};
 
 const AGENT_RUN_EVENT: &str = "agent-run-event";
@@ -71,6 +74,7 @@ pub async fn run_tool_probe(
         .map_err(|err| err.to_string())?;
     let tools = LocalToolRegistry::new(workspace.clone());
     let tool_definitions = tools.definitions();
+    let policy_tools = PolicyEnforcedToolRegistry::with_default_policy(tools);
 
     let system = ConversationMessage {
         id: Uuid::new_v4(),
@@ -109,7 +113,7 @@ pub async fn run_tool_probe(
         return Err(format!("unexpected tool call: {}", tool_call.name));
     }
 
-    let tool_result = tools
+    let tool_result = policy_tools
         .execute(
             ToolExecutionRequest {
                 call_id: tool_call.id.clone(),
@@ -161,16 +165,18 @@ pub async fn run_agent_turn(
         .get(request.workspace_id)
         .map_err(|err| err.to_string())?;
     let tools = LocalToolRegistry::new(workspace);
+    let tool_definitions = tools.definitions();
+    let policy_tools = PolicyEnforcedToolRegistry::with_default_policy(tools);
     let cancellation = runs.begin(request.run_id).map_err(|err| err.to_string())?;
 
     let result = run_agent_turn_core(
         &backend,
-        &tools,
+        &policy_tools,
         AgentTurnRequest {
             model: request.model,
             history: request.history,
             user_prompt: request.user_prompt,
-            tools: tools.definitions(),
+            tools: tool_definitions,
         },
         cancellation,
     )
@@ -197,6 +203,8 @@ pub async fn run_agent_turn_stream(
         .get(request.workspace_id)
         .map_err(|err| err.to_string())?;
     let tools = LocalToolRegistry::new(workspace);
+    let tool_definitions = tools.definitions();
+    let policy_tools = PolicyEnforcedToolRegistry::with_default_policy(tools);
     let cancellation = runs.begin(request.run_id).map_err(|err| err.to_string())?;
     let run_id = request.run_id;
     let mut emit_event = |event: AgentRunEvent| {
@@ -206,12 +214,12 @@ pub async fn run_agent_turn_stream(
 
     let result = run_agent_turn_streaming_core(
         &backend,
-        &tools,
+        &policy_tools,
         AgentTurnRequest {
             model: request.model,
             history: request.history,
             user_prompt: request.user_prompt,
-            tools: tools.definitions(),
+            tools: tool_definitions,
         },
         cancellation,
         &mut emit_event,
@@ -293,6 +301,45 @@ pub async fn list_sessions(
         .list_sessions()
         .await
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn list_pending_approvals(
+    approvals: State<'_, ApprovalRequestStore>,
+) -> Result<Vec<PendingApproval>, String> {
+    approvals.list().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn resolve_approval(
+    request_id: Uuid,
+    approved: bool,
+    reason: String,
+    approvals: State<'_, ApprovalRequestStore>,
+    sessions: State<'_, JsonlSessionStore>,
+) -> Result<ResolvedApproval, String> {
+    let resolved = approvals
+        .prepare_resolution(request_id, approved, "user", reason)
+        .map_err(|err| err.to_string())?;
+
+    if let Some(session_id) = resolved.session_id {
+        sessions
+            .append_event(
+                session_id,
+                SessionEvent::ApprovalResolved {
+                    run_id: resolved.run_id,
+                    decision: resolved.decision.clone(),
+                },
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+
+    approvals
+        .complete(request_id)
+        .map_err(|err| err.to_string())?;
+
+    Ok(resolved)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

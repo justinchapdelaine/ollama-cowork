@@ -7,6 +7,10 @@ use std::{
     path::Path,
 };
 
+use crate::core::approval::{
+    ApprovalPolicy, ApprovalRequest, ApprovalRequirement, ApprovalSubject, DefaultApprovalPolicy,
+    RequestedCapability,
+};
 use crate::core::error::{AppError, AppResult};
 use crate::core::messages::ToolResult;
 use crate::core::model::ToolDefinition;
@@ -32,6 +36,53 @@ pub struct ToolExecutionRequest {
     pub call_id: Option<String>,
     pub name: String,
     pub arguments: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyEnforcedToolRegistry<T, P = DefaultApprovalPolicy> {
+    inner: T,
+    policy: P,
+}
+
+impl<T> PolicyEnforcedToolRegistry<T, DefaultApprovalPolicy> {
+    pub fn with_default_policy(inner: T) -> Self {
+        Self {
+            inner,
+            policy: DefaultApprovalPolicy,
+        }
+    }
+}
+
+impl<T, P> PolicyEnforcedToolRegistry<T, P> {
+    pub fn new(inner: T, policy: P) -> Self {
+        Self { inner, policy }
+    }
+}
+
+#[async_trait]
+impl<T, P> ToolRegistry for PolicyEnforcedToolRegistry<T, P>
+where
+    T: ToolRegistry + Send + Sync,
+    P: ApprovalPolicy + Send + Sync,
+{
+    async fn execute(
+        &self,
+        request: ToolExecutionRequest,
+        cancellation: CancellationFlag,
+    ) -> AppResult<ToolResult> {
+        let approval_request = approval_request_for_tool(&request);
+        match self.policy.evaluate(&approval_request) {
+            ApprovalRequirement::Allow => self.inner.execute(request, cancellation).await,
+            ApprovalRequirement::RequireManualApproval => Err(AppError::ApprovalRequired(format!(
+                "{}: {}",
+                approval_request.summary, approval_request.reason
+            ))),
+            ApprovalRequirement::Deny => Err(AppError::PolicyDenied(format!(
+                "{}: {}",
+                approval_request.summary, approval_request.reason
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -294,6 +345,33 @@ impl ToolRegistry for LocalToolRegistry {
     }
 }
 
+pub fn approval_request_for_tool(request: &ToolExecutionRequest) -> ApprovalRequest {
+    let requested_capabilities = match request.name.as_str() {
+        "list_files" | "read_file" | "search_files" => vec![RequestedCapability::WorkspaceRead],
+        _ => Vec::new(),
+    };
+
+    ApprovalRequest {
+        id: uuid::Uuid::new_v4(),
+        summary: format!("Run tool `{}`", request.name),
+        subject: ApprovalSubject::ToolCall {
+            name: request.name.clone(),
+            arguments: request.arguments.clone(),
+        },
+        requested_capabilities,
+        reason: tool_policy_reason(&request.name).to_string(),
+    }
+}
+
+fn tool_policy_reason(name: &str) -> &'static str {
+    match name {
+        "list_files" => "list workspace-relative directory entries",
+        "read_file" => "read a workspace-relative file with bounded output",
+        "search_files" => "search workspace-relative text files with bounded output",
+        _ => "tool is not registered in the current tool policy",
+    }
+}
+
 fn read_bounded_file(
     path: &Path,
     max_bytes: usize,
@@ -417,6 +495,8 @@ mod tests {
     use std::path::PathBuf;
 
     use serde_json::json;
+
+    use crate::core::approval::{ApprovalPolicy, ApprovalRequirement};
 
     use super::*;
 
@@ -550,6 +630,73 @@ mod tests {
             .expect("safe search should succeed");
         assert_eq!(result.name, "search_files");
         assert!(result.content["matches"].is_array());
+    }
+
+    #[tokio::test]
+    async fn policy_enforced_registry_allows_read_only_tools() {
+        let registry = PolicyEnforcedToolRegistry::with_default_policy(LocalToolRegistry::new(
+            test_workspace(),
+        ));
+        let request = ToolExecutionRequest {
+            call_id: Some("call_test".to_string()),
+            name: "list_files".to_string(),
+            arguments: json!({ "path": "." }),
+        };
+
+        let result = registry
+            .execute(request, CancellationFlag::default())
+            .await
+            .expect("read-only tool should be auto-allowed");
+
+        assert_eq!(result.name, "list_files");
+    }
+
+    #[tokio::test]
+    async fn policy_enforced_registry_denies_unclassified_tools() {
+        let registry = PolicyEnforcedToolRegistry::with_default_policy(LocalToolRegistry::new(
+            test_workspace(),
+        ));
+        let request = ToolExecutionRequest {
+            call_id: Some("call_test".to_string()),
+            name: "write_file".to_string(),
+            arguments: json!({ "path": "README.md", "content": "change" }),
+        };
+
+        let err = registry
+            .execute(request, CancellationFlag::default())
+            .await
+            .expect_err("unclassified tools should be denied before execution");
+
+        assert!(matches!(err, AppError::PolicyDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn policy_enforced_registry_surfaces_manual_approval_requirements() {
+        #[derive(Clone)]
+        struct RequireApprovalPolicy;
+
+        impl ApprovalPolicy for RequireApprovalPolicy {
+            fn evaluate(&self, _request: &ApprovalRequest) -> ApprovalRequirement {
+                ApprovalRequirement::RequireManualApproval
+            }
+        }
+
+        let registry = PolicyEnforcedToolRegistry::new(
+            LocalToolRegistry::new(test_workspace()),
+            RequireApprovalPolicy,
+        );
+        let request = ToolExecutionRequest {
+            call_id: Some("call_test".to_string()),
+            name: "list_files".to_string(),
+            arguments: json!({ "path": "." }),
+        };
+
+        let err = registry
+            .execute(request, CancellationFlag::default())
+            .await
+            .expect_err("manual approval should halt execution");
+
+        assert!(matches!(err, AppError::ApprovalRequired(_)));
     }
 
     fn test_workspace() -> WorkspaceContext {

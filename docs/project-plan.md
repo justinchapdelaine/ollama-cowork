@@ -2,7 +2,7 @@
 
 This is the living handoff document for Ollama Cowork. Keep it continuously updated as decisions, test results, priorities, and implementation status change. If it starts drifting from the code or conversation, update this file before relying on it for planning.
 
-Last updated: 2026-07-06
+Last updated: 2026-07-08
 
 ## Purpose
 
@@ -46,7 +46,7 @@ This document should answer "where are we, what did we decide, and what should h
 
 ## Current Implementation
 
-- Latest committed checkpoint: `ba60c3e` on `branch/init`, `feat: add durable session storage`.
+- Latest committed checkpoint: `aff8473` on `branch/init`, `feat(sessions): add recent session reloads`.
 - Tauri app launches with workspace picker, Ollama settings, diagnostics, and chat UI.
 - Ollama backend can probe `/api/version`, list `/api/tags`, and run both non-streaming and streaming `/api/chat` turns.
 - Agent loop supports thinking, tool calls, tool results, final assistant messages, bounded tool iterations, run-event streaming, and non-streaming fallback.
@@ -55,6 +55,7 @@ This document should answer "where are we, what did we decide, and what should h
 - Context compaction summarizes older history while preserving recent messages.
 - Read-only local tools support bounded file reads, file search, hidden/generated entry reporting, and cancellation checks.
 - UI renders conversation history, streaming thinking/content deltas, collapsible thinking, tool call/result blocks, status output, recent sessions, and responsive/narrow-window layouts; it creates a new durable session for each selected workspace, persists completed turns, and can reload saved sessions.
+- Approval/runtime scaffold work has started with typed capability categories, approval request/decision message shapes, default policy behavior, a policy-enforced tool boundary around read-only tools, pending approval storage, and a basic manual approval UI surface.
 - Planning docs exist for sandboxing, engineering guidelines, skills/extensions, and MCP integration.
 
 ## Recent Test Evidence
@@ -86,32 +87,33 @@ This document should answer "where are we, what did we decide, and what should h
 
 ## Next Milestones
 
-1. Stabilize modular Ollama streaming.
-   - Verify streaming behavior against `gemma4:12b` in the real Tauri UI.
-   - Add focused regression coverage for stream chunk aggregation and frontend event reduction.
-   - Keep non-streaming as a fallback while the streamed path matures.
-   - Continue routing frontend updates through a run-event reducer instead of mixing transport details into rendering.
-
-2. Add durable session storage.
-   - Extend the initial JSONL session store toward full run-event/audit capture.
-   - Persist selected workspace metadata, messages, completed/failed/cancelled turns, tool calls, approvals, and summaries.
-   - Keep improving conversation reload with search, pruning, and clearer session metadata.
-   - Keep UI state separate from session history.
-
-3. Build the approval/runtime scaffold.
+1. Build the approval/runtime scaffold.
    - Define capability categories for reads, writes, commands, network, installs, destructive operations, and host-affecting actions.
    - Add approval request/result message types in the session model.
    - Keep side-effecting capabilities disabled by default.
+   - Keep reviewer, policy, session logging, and runtime execution boundaries modular.
+   - Next: generate approval requests from side-effecting tools/runtime commands and resume or deny those actions based on the stored decision.
 
-4. Implement copy-then-patch.
+2. Implement copy-then-patch.
    - Create a copied workspace runtime.
    - Generate reviewable diffs.
    - Apply approved whole patches back to the source workspace.
    - Preserve room for future per-file and per-hunk approvals.
 
-5. Prototype the elevated Windows OS sandbox runner.
+3. Prototype the elevated Windows OS sandbox runner.
    - Start without system mutations where possible.
    - Later, with explicit admin approval, create dedicated sandbox users/groups, ACLs, offline-by-default network controls, cleanup, and launch behavior.
+
+4. Continue durable session/audit improvements.
+   - Extend the JSONL session store toward full run-event/audit capture.
+   - Persist approvals, command decisions, tool calls, and summaries.
+   - Keep improving conversation reload with search, pruning, and clearer session metadata.
+   - Keep UI state separate from session history.
+
+5. Continue streaming/UI polish.
+   - Keep non-streaming as a fallback while the streamed path matures.
+   - Continue routing frontend updates through modular run-event handling.
+   - Add more regression coverage for frontend event reduction and cancellation UX.
 
 ## Backlog
 

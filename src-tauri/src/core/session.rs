@@ -10,8 +10,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::approval::{ApprovalDecision, ApprovalRequest};
 use crate::core::error::{AppError, AppResult};
-use crate::core::messages::ConversationMessage;
+use crate::core::messages::{
+    ApprovalDecisionMessage, ApprovalRequestMessage, ConversationMessage, MessagePart, MessageRole,
+};
 
 #[async_trait]
 pub trait SessionStore: Send + Sync {
@@ -251,6 +254,14 @@ pub enum SessionEvent {
     AgentTurnCancelled {
         run_id: Uuid,
     },
+    ApprovalRequested {
+        run_id: Option<Uuid>,
+        request: ApprovalRequest,
+    },
+    ApprovalResolved {
+        run_id: Option<Uuid>,
+        decision: ApprovalDecision,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,26 +290,69 @@ struct SessionCreatedRecord {
 }
 
 fn apply_event(snapshot: &mut SessionSnapshot, event: SessionEvent, at_ms: u64) {
-    if let SessionEvent::AgentTurnCompleted {
-        base_url,
-        model,
-        messages,
-        ..
-    } = &event
-    {
-        if let Some(base_url) = base_url {
-            snapshot.base_url = Some(base_url.clone());
+    match &event {
+        SessionEvent::AgentTurnCompleted {
+            base_url,
+            model,
+            messages,
+            ..
+        } => {
+            if let Some(base_url) = base_url {
+                snapshot.base_url = Some(base_url.clone());
+            }
+            if let Some(model) = model {
+                snapshot.model = Some(model.clone());
+            }
+            snapshot.messages.extend(messages.iter().cloned());
         }
-        if let Some(model) = model {
-            snapshot.model = Some(model.clone());
+        SessionEvent::ApprovalRequested { request, .. } => {
+            snapshot.messages.push(approval_request_message(request));
         }
-        snapshot.messages.extend(messages.iter().cloned());
+        SessionEvent::ApprovalResolved { decision, .. } => {
+            snapshot.messages.push(approval_decision_message(decision));
+        }
+        SessionEvent::AgentTurnFailed { .. } | SessionEvent::AgentTurnCancelled { .. } => {}
     }
 
     snapshot.updated_at_ms = at_ms;
     snapshot
         .events
         .push(TimestampedSessionEvent { at_ms, event });
+}
+
+fn approval_request_message(request: &ApprovalRequest) -> ConversationMessage {
+    ConversationMessage {
+        id: request.id,
+        role: MessageRole::Assistant,
+        parts: vec![MessagePart::ApprovalRequest {
+            request: ApprovalRequestMessage {
+                id: request.id,
+                summary: request.summary.clone(),
+                requested_capabilities: request
+                    .requested_capabilities
+                    .iter()
+                    .map(|capability| capability.as_str().to_string())
+                    .collect(),
+                reason: request.reason.clone(),
+            },
+        }],
+    }
+}
+
+fn approval_decision_message(decision: &ApprovalDecision) -> ConversationMessage {
+    ConversationMessage {
+        id: decision.id,
+        role: MessageRole::User,
+        parts: vec![MessagePart::ApprovalDecision {
+            decision: ApprovalDecisionMessage {
+                id: decision.id,
+                request_id: decision.request_id,
+                approved: decision.approved,
+                reviewer: decision.reviewer.clone(),
+                reason: decision.reason.clone(),
+            },
+        }],
+    }
 }
 
 fn now_ms() -> u64 {
@@ -313,7 +367,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::messages::{MessagePart, MessageRole};
+    use crate::core::approval::{ApprovalDecision, ApprovalSubject, RequestedCapability};
 
     #[tokio::test]
     async fn jsonl_session_store_replays_completed_turns() {
@@ -435,6 +489,73 @@ mod tests {
 
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, valid.id);
+    }
+
+    #[tokio::test]
+    async fn jsonl_session_store_replays_approval_events_as_messages() {
+        let store = JsonlSessionStore::new(test_session_dir());
+        let session = store
+            .create_session(CreateSessionRequest {
+                title: "Approval session".to_string(),
+                workspace_root: None,
+                base_url: None,
+                model: None,
+            })
+            .await
+            .expect("create session");
+        let request = ApprovalRequest {
+            id: Uuid::new_v4(),
+            summary: "Run command `cargo test`".to_string(),
+            subject: ApprovalSubject::RuntimeCommand {
+                program: "cargo".to_string(),
+                args: vec!["test".to_string()],
+                cwd: ".".to_string(),
+            },
+            requested_capabilities: vec![RequestedCapability::Command],
+            reason: "runtime command execution requires approval".to_string(),
+        };
+        let decision = ApprovalDecision {
+            id: Uuid::new_v4(),
+            request_id: request.id,
+            approved: true,
+            reviewer: "user".to_string(),
+            reason: "approved for test".to_string(),
+        };
+
+        store
+            .append_event(
+                session.id,
+                SessionEvent::ApprovalRequested {
+                    run_id: Some(Uuid::new_v4()),
+                    request: request.clone(),
+                },
+            )
+            .await
+            .expect("append request");
+        store
+            .append_event(
+                session.id,
+                SessionEvent::ApprovalResolved {
+                    run_id: None,
+                    decision: decision.clone(),
+                },
+            )
+            .await
+            .expect("append decision");
+
+        let loaded = store.load_session(session.id).await.expect("load session");
+
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].id, request.id);
+        assert!(matches!(
+            loaded.messages[0].parts.first(),
+            Some(MessagePart::ApprovalRequest { request }) if request.requested_capabilities == ["command"]
+        ));
+        assert_eq!(loaded.messages[1].id, decision.id);
+        assert!(matches!(
+            loaded.messages[1].parts.first(),
+            Some(MessagePart::ApprovalDecision { decision }) if decision.approved
+        ));
     }
 
     fn text_message(role: MessageRole, text: &str) -> ConversationMessage {

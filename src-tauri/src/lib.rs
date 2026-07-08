@@ -2,17 +2,21 @@ mod commands;
 pub mod core;
 
 use commands::{
-    append_session_event, cancel_agent_run, choose_workspace, create_session, list_sessions,
-    load_session, probe_ollama, run_agent_turn, run_agent_turn_stream, run_tool_probe,
-    select_workspace_path,
+    append_session_event, cancel_agent_run, choose_workspace, create_session,
+    list_pending_approvals, list_sessions, load_session, probe_ollama, resolve_approval,
+    run_agent_turn, run_agent_turn_stream, run_tool_probe, select_workspace_path,
 };
-use core::{run::AgentRunStore, session::JsonlSessionStore, workspace::WorkspaceSelectionStore};
+use core::{
+    approval::ApprovalRequestStore, run::AgentRunStore, session::JsonlSessionStore,
+    workspace::WorkspaceSelectionStore,
+};
 use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
         .manage(WorkspaceSelectionStore::default())
         .manage(AgentRunStore::default())
+        .manage(ApprovalRequestStore::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let session_root = app.path().app_data_dir()?.join("sessions");
@@ -25,8 +29,10 @@ pub fn run() {
             choose_workspace,
             create_session,
             list_sessions,
+            list_pending_approvals,
             load_session,
             probe_ollama,
+            resolve_approval,
             run_agent_turn,
             run_agent_turn_stream,
             run_tool_probe,

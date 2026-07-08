@@ -14,12 +14,61 @@ export type ToolResult = {
   content: unknown;
 };
 
+export type ApprovalRequestMessage = {
+  id: string;
+  summary: string;
+  requestedCapabilities: string[];
+  reason: string;
+};
+
+export type ApprovalDecisionMessage = {
+  id: string;
+  requestId: string;
+  approved: boolean;
+  reviewer: string;
+  reason: string;
+};
+
+export type ApprovalSubject =
+  | { type: "tool_call"; name: string; arguments: unknown }
+  | { type: "runtime_command"; program: string; args: string[]; cwd: string }
+  | { type: "patch_apply"; summary: string };
+
+export type ApprovalRequest = {
+  id: string;
+  summary: string;
+  subject: ApprovalSubject;
+  requestedCapabilities: string[];
+  reason: string;
+};
+
+export type ApprovalDecision = {
+  id: string;
+  requestId: string;
+  approved: boolean;
+  reviewer: string;
+  reason: string;
+};
+
+export type PendingApproval = {
+  request: ApprovalRequest;
+  sessionId?: string;
+  runId?: string;
+  createdAtMs: number;
+};
+
+export type ResolvedApproval = PendingApproval & {
+  decision: ApprovalDecision;
+  resolvedAtMs: number;
+};
+
 export type MessagePart =
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
   | { type: "tool_call"; call: ToolCall }
   | { type: "tool_result"; result: ToolResult }
-  | { type: "approval_request"; request: unknown }
+  | { type: "approval_request"; request: ApprovalRequestMessage }
+  | { type: "approval_decision"; decision: ApprovalDecisionMessage }
   | { type: "diff"; diff: unknown };
 
 export type ConversationMessage = {
@@ -48,7 +97,9 @@ export type SessionEvent =
       tool_iteration_count: number;
     }
   | { type: "agent_turn_failed"; run_id: string; message: string }
-  | { type: "agent_turn_cancelled"; run_id: string };
+  | { type: "agent_turn_cancelled"; run_id: string }
+  | { type: "approval_requested"; run_id?: string; request: ApprovalRequest }
+  | { type: "approval_resolved"; run_id?: string; decision: ApprovalDecision };
 
 export type SessionSnapshot = {
   id: string;
@@ -256,6 +307,18 @@ export async function loadSession(sessionId: string): Promise<SessionSnapshot> {
 
 export async function selectWorkspacePath(sourceRoot: string): Promise<WorkspaceSelection> {
   return invoke("select_workspace_path", { sourceRoot });
+}
+
+export async function listPendingApprovals(): Promise<PendingApproval[]> {
+  return invoke("list_pending_approvals");
+}
+
+export async function resolveApproval(
+  requestId: string,
+  approved: boolean,
+  reason: string,
+): Promise<ResolvedApproval> {
+  return invoke("resolve_approval", { requestId, approved, reason });
 }
 
 export function workspaceTitle(path: string): string {

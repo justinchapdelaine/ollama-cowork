@@ -9,6 +9,7 @@ use std::{
 use uuid::Uuid;
 
 use crate::core::error::{AppError, AppResult};
+use crate::core::session::{SessionEvent, SessionId, SessionStore};
 
 #[async_trait]
 pub trait ApprovalReviewer: Send + Sync {
@@ -114,6 +115,13 @@ pub struct ResolvedApproval {
     pub decision: ApprovalDecision,
     pub created_at_ms: u64,
     pub resolved_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ApprovalSubmission {
+    Allowed { request: ApprovalRequest },
+    PendingManualApproval { pending: PendingApproval },
 }
 
 #[derive(Debug, Default)]
@@ -223,6 +231,44 @@ impl ApprovalPolicy for DefaultApprovalPolicy {
     }
 }
 
+pub async fn submit_approval_request<P, S>(
+    request: ApprovalRequest,
+    session_id: Option<SessionId>,
+    run_id: Option<Uuid>,
+    policy: &P,
+    approvals: &ApprovalRequestStore,
+    sessions: Option<&S>,
+) -> AppResult<ApprovalSubmission>
+where
+    P: ApprovalPolicy,
+    S: SessionStore + ?Sized,
+{
+    match policy.evaluate(&request) {
+        ApprovalRequirement::Allow => Ok(ApprovalSubmission::Allowed { request }),
+        ApprovalRequirement::RequireManualApproval => {
+            let pending = approvals.request(request.clone(), session_id, run_id)?;
+            if let (Some(session_id), Some(sessions)) = (session_id, sessions) {
+                if let Err(err) = sessions
+                    .append_event(
+                        session_id,
+                        SessionEvent::ApprovalRequested { run_id, request },
+                    )
+                    .await
+                {
+                    let _ = approvals.complete(pending.request.id);
+                    return Err(err);
+                }
+            }
+
+            Ok(ApprovalSubmission::PendingManualApproval { pending })
+        }
+        ApprovalRequirement::Deny => Err(AppError::PolicyDenied(format!(
+            "{}: {}",
+            request.summary, request.reason
+        ))),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DeferredApprovalReviewer;
 
@@ -248,6 +294,8 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::session::{CreateSessionRequest, JsonlSessionStore};
+    use std::path::PathBuf;
 
     #[test]
     fn default_policy_allows_workspace_reads() {
@@ -349,6 +397,109 @@ mod tests {
         assert_eq!(store.list().expect("list pending").len(), 1);
     }
 
+    #[tokio::test]
+    async fn submit_approval_request_allows_auto_allowed_requests() {
+        let approvals = ApprovalRequestStore::default();
+        let request = tool_request(
+            "read_file",
+            vec![RequestedCapability::WorkspaceRead],
+            "read a selected workspace file",
+        );
+        let request_id = request.id;
+
+        let submitted = submit_approval_request(
+            request,
+            None,
+            None,
+            &DefaultApprovalPolicy,
+            &approvals,
+            Option::<&JsonlSessionStore>::None,
+        )
+        .await
+        .expect("submit auto-allowed request");
+
+        assert!(matches!(
+            submitted,
+            ApprovalSubmission::Allowed { request } if request.id == request_id
+        ));
+        assert!(approvals.list().expect("list pending").is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_approval_request_stores_and_logs_manual_requests() {
+        let approvals = ApprovalRequestStore::default();
+        let sessions = JsonlSessionStore::new(test_session_dir());
+        let session = sessions
+            .create_session(CreateSessionRequest {
+                title: "Approval gate".to_string(),
+                workspace_root: None,
+                base_url: None,
+                model: None,
+            })
+            .await
+            .expect("create session");
+        let request = tool_request(
+            "run_command",
+            vec![RequestedCapability::Command],
+            "runtime command execution requires approval",
+        );
+        let request_id = request.id;
+        let run_id = Uuid::new_v4();
+
+        let submitted = submit_approval_request(
+            request,
+            Some(session.id),
+            Some(run_id),
+            &DefaultApprovalPolicy,
+            &approvals,
+            Some(&sessions),
+        )
+        .await
+        .expect("submit manual request");
+
+        assert!(matches!(
+            submitted,
+            ApprovalSubmission::PendingManualApproval { pending }
+                if pending.request.id == request_id && pending.run_id == Some(run_id)
+        ));
+        assert_eq!(approvals.list().expect("list pending").len(), 1);
+
+        let loaded = sessions
+            .load_session(session.id)
+            .await
+            .expect("load session");
+        assert_eq!(loaded.events.len(), 1);
+        assert!(matches!(
+            &loaded.events[0].event,
+            SessionEvent::ApprovalRequested { request, .. } if request.id == request_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn submit_approval_request_rolls_back_pending_when_session_log_fails() {
+        let approvals = ApprovalRequestStore::default();
+        let sessions = JsonlSessionStore::new(test_session_dir());
+        let request = tool_request(
+            "run_command",
+            vec![RequestedCapability::Command],
+            "runtime command execution requires approval",
+        );
+
+        let err = submit_approval_request(
+            request,
+            Some(SessionId(Uuid::new_v4())),
+            None,
+            &DefaultApprovalPolicy,
+            &approvals,
+            Some(&sessions),
+        )
+        .await
+        .expect_err("unknown session should fail");
+
+        assert!(err.to_string().contains("session store error"));
+        assert!(approvals.list().expect("list pending").is_empty());
+    }
+
     fn tool_request(
         name: &str,
         requested_capabilities: Vec<RequestedCapability>,
@@ -364,5 +515,11 @@ mod tests {
             requested_capabilities,
             reason: reason.to_string(),
         }
+    }
+
+    fn test_session_dir() -> PathBuf {
+        std::env::temp_dir()
+            .join("ollama-cowork-approval-tests")
+            .join(Uuid::new_v4().to_string())
     }
 }

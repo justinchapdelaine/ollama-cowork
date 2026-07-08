@@ -55,7 +55,7 @@ This document should answer "where are we, what did we decide, and what should h
 - Context compaction summarizes older history while preserving recent messages.
 - Read-only local tools support bounded file reads, file search, hidden/generated entry reporting, and cancellation checks.
 - UI renders conversation history, streaming thinking/content deltas, collapsible thinking, tool call/result blocks, status output, recent sessions, and responsive/narrow-window layouts; it creates a new durable session for each selected workspace, persists completed turns, and can reload saved sessions.
-- Approval/runtime scaffold work has started with typed capability categories, approval request/decision message shapes, default policy behavior, a policy-enforced tool boundary around read-only tools, pending approval storage, and a basic manual approval UI surface.
+- Approval/runtime scaffold work has started with typed capability categories, approval request/decision message shapes, default policy behavior, a policy-enforced tool boundary around read-only tools, pending approval storage, a reusable approval submission gate, session logging for requested/resolved approvals, a runtime command approval request command, and a basic manual approval UI surface.
 - Planning docs exist for sandboxing, engineering guidelines, skills/extensions, and MCP integration.
 
 ## Recent Test Evidence
@@ -92,7 +92,7 @@ This document should answer "where are we, what did we decide, and what should h
    - Add approval request/result message types in the session model.
    - Keep side-effecting capabilities disabled by default.
    - Keep reviewer, policy, session logging, and runtime execution boundaries modular.
-   - Next: generate approval requests from side-effecting tools/runtime commands and resume or deny those actions based on the stored decision.
+   - Next: attach the runtime command runner to approved decisions, then resume or deny queued actions based on the stored decision.
 
 2. Implement copy-then-patch.
    - Create a copied workspace runtime.

@@ -33,6 +33,7 @@ pub struct WorkspaceId(pub Uuid);
 pub struct RelativePath(pub PathBuf);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommandSpec {
     pub program: String,
     pub args: Vec<String>,

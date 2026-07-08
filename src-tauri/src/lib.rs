@@ -3,8 +3,9 @@ pub mod core;
 
 use commands::{
     append_session_event, cancel_agent_run, choose_workspace, create_session,
-    list_pending_approvals, list_sessions, load_session, probe_ollama, resolve_approval,
-    run_agent_turn, run_agent_turn_stream, run_tool_probe, select_workspace_path,
+    list_pending_approvals, list_sessions, load_session, probe_ollama,
+    request_runtime_command_approval, resolve_approval, run_agent_turn, run_agent_turn_stream,
+    run_tool_probe, select_workspace_path,
 };
 use core::{
     approval::ApprovalRequestStore, run::AgentRunStore, session::JsonlSessionStore,
@@ -32,6 +33,7 @@ pub fn run() {
             list_pending_approvals,
             load_session,
             probe_ollama,
+            request_runtime_command_approval,
             resolve_approval,
             run_agent_turn,
             run_agent_turn_stream,

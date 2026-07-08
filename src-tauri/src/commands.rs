@@ -8,12 +8,16 @@ use crate::core::agent::{
     run_agent_turn_streaming as run_agent_turn_streaming_core, AgentRunEvent, AgentTurnRequest,
     AgentTurnResponse,
 };
-use crate::core::approval::{ApprovalRequestStore, PendingApproval, ResolvedApproval};
+use crate::core::approval::{
+    submit_approval_request, ApprovalRequestStore, ApprovalSubmission, DefaultApprovalPolicy,
+    PendingApproval, ResolvedApproval,
+};
 use crate::core::messages::{ConversationMessage, MessagePart, MessageRole, ToolCall, ToolResult};
 use crate::core::model::{
     ChatRequest, ModelBackend, OllamaBackend, OllamaConfig, ProbeOllamaResponse, ThinkMode,
 };
 use crate::core::run::{AgentRunStore, CancellationFlag};
+use crate::core::runtime::CommandSpec;
 use crate::core::session::{
     CreateSessionRequest, JsonlSessionStore, SessionEvent, SessionId, SessionSnapshot,
     SessionStore, SessionSummary,
@@ -311,6 +315,24 @@ pub async fn list_pending_approvals(
 }
 
 #[tauri::command]
+pub async fn request_runtime_command_approval(
+    request: RuntimeCommandApprovalRequest,
+    approvals: State<'_, ApprovalRequestStore>,
+    sessions: State<'_, JsonlSessionStore>,
+) -> Result<ApprovalSubmission, String> {
+    submit_approval_request(
+        request.command.approval_request(),
+        Some(request.session_id),
+        request.run_id,
+        &DefaultApprovalPolicy,
+        &approvals,
+        Some(&*sessions),
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub async fn resolve_approval(
     request_id: Uuid,
     approved: bool,
@@ -351,6 +373,14 @@ pub struct AgentTurnCommandRequest {
     pub run_id: Uuid,
     pub user_prompt: String,
     pub history: Vec<ConversationMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCommandApprovalRequest {
+    pub session_id: SessionId,
+    pub run_id: Option<Uuid>,
+    pub command: CommandSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

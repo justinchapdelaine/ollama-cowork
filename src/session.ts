@@ -62,6 +62,20 @@ export type ResolvedApproval = PendingApproval & {
   resolvedAtMs: number;
 };
 
+export type NetworkPolicy = "offline" | "approved_online";
+
+export type RuntimeCommandSpec = {
+  program: string;
+  args: string[];
+  cwd: string;
+  timeoutMs: number;
+  network: NetworkPolicy;
+};
+
+export type ApprovalSubmission =
+  | { status: "allowed"; request: ApprovalRequest }
+  | { status: "pending_manual_approval"; pending: PendingApproval };
+
 export type MessagePart =
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
@@ -311,6 +325,20 @@ export async function selectWorkspacePath(sourceRoot: string): Promise<Workspace
 
 export async function listPendingApprovals(): Promise<PendingApproval[]> {
   return invoke("list_pending_approvals");
+}
+
+export async function requestRuntimeCommandApproval(
+  command: RuntimeCommandSpec,
+  sessionId: string,
+  runId?: string,
+): Promise<ApprovalSubmission> {
+  return invoke("request_runtime_command_approval", {
+    request: {
+      sessionId,
+      runId,
+      command,
+    },
+  });
 }
 
 export async function resolveApproval(

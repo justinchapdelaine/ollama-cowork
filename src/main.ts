@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   type AgentTurnResponse,
+  type ApprovalDecision,
   type ConversationMessage,
   type MessageRole,
   type PendingApproval,
@@ -14,6 +15,7 @@ import {
   listPendingApprovals,
   listSessions,
   loadSession,
+  requestRuntimeCommandApproval,
   resolveApproval,
   selectWorkspacePath,
   SessionController,
@@ -78,6 +80,7 @@ app.innerHTML = `
       <div class="actions">
         <button id="probe" type="button">Probe Ollama</button>
         <button id="tool-probe" type="button">Run Tool Probe</button>
+        <button id="command-approval-probe" type="button">Request Command Approval</button>
       </div>
     </header>
 
@@ -154,6 +157,7 @@ app.innerHTML = `
 const output = document.querySelector<HTMLPreElement>("#output");
 const probe = document.querySelector<HTMLButtonElement>("#probe");
 const toolProbe = document.querySelector<HTMLButtonElement>("#tool-probe");
+const commandApprovalProbe = document.querySelector<HTMLButtonElement>("#command-approval-probe");
 const chooseWorkspace = document.querySelector<HTMLButtonElement>("#choose-workspace");
 const workspaceRoot = document.querySelector<HTMLInputElement>("#workspace-root");
 const baseUrl = document.querySelector<HTMLInputElement>("#base-url");
@@ -191,6 +195,9 @@ function updateReadyState() {
   if (toolProbe) {
     toolProbe.disabled = !hasWorkspace || isRunning;
   }
+  if (commandApprovalProbe) {
+    commandApprovalProbe.disabled = !hasSession || isRunning;
+  }
   if (promptInput) {
     promptInput.disabled = !hasWorkspace || !hasSession || isRunning;
   }
@@ -204,6 +211,9 @@ function updateReadyState() {
     refreshSessions.disabled = isRunning;
   }
   for (const button of sessionList?.querySelectorAll<HTMLButtonElement>("button") ?? []) {
+    button.disabled = isRunning;
+  }
+  for (const button of approvalList?.querySelectorAll<HTMLButtonElement>("button") ?? []) {
     button.disabled = isRunning;
   }
 }
@@ -326,6 +336,8 @@ function renderApprovalList(approvals: PendingApproval[]) {
     item.append(title, meta, reason, actions);
     approvalList.append(item);
   }
+
+  updateReadyState();
 }
 
 async function refreshApprovalList() {
@@ -338,23 +350,71 @@ async function refreshApprovalList() {
     approvalList.textContent = `Could not load approvals: ${
       error instanceof Error ? error.message : String(error)
     }`;
+  } finally {
+    updateReadyState();
   }
 }
 
 async function resolvePendingApproval(requestId: string, approved: boolean) {
   setStatus(approved ? "Approving request..." : "Denying request...");
   try {
-    await resolveApproval(
+    const resolved = await resolveApproval(
       requestId,
       approved,
       approved ? "Approved by user." : "Denied by user.",
     );
+    if (resolved.sessionId === sessions.activeSessionId) {
+      appendApprovalDecisionMessage(resolved.decision);
+    }
     setStatus(approved ? "Approval granted." : "Approval denied.");
     await refreshApprovalList();
     await refreshSessionList();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   }
+}
+
+function appendApprovalRequestMessage(request: PendingApproval["request"]) {
+  if (sessions.findMessage(request.id)) return;
+
+  sessions.appendMessage({
+    id: request.id,
+    role: "assistant",
+    parts: [
+      {
+        type: "approval_request",
+        request: {
+          id: request.id,
+          summary: request.summary,
+          requestedCapabilities: request.requestedCapabilities,
+          reason: request.reason,
+        },
+      },
+    ],
+  });
+  renderConversation();
+}
+
+function appendApprovalDecisionMessage(decision: ApprovalDecision) {
+  if (sessions.findMessage(decision.id)) return;
+
+  sessions.appendMessage({
+    id: decision.id,
+    role: "user",
+    parts: [
+      {
+        type: "approval_decision",
+        decision: {
+          id: decision.id,
+          requestId: decision.requestId,
+          approved: decision.approved,
+          reviewer: decision.reviewer,
+          reason: decision.reason,
+        },
+      },
+    ],
+  });
+  renderConversation();
 }
 
 function syncActiveSessionFields() {
@@ -700,6 +760,45 @@ toolProbe?.addEventListener("click", async () => {
       final_content: result.final_content,
     });
     setStatus("Tool probe completed.");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    updateReadyState();
+  }
+});
+
+commandApprovalProbe?.addEventListener("click", async () => {
+  const sessionId = sessions.activeSessionId ?? undefined;
+  if (!sessionId || !commandApprovalProbe) {
+    setStatus("Choose a workspace folder before requesting command approval.");
+    return;
+  }
+
+  setStatus("Requesting command approval...");
+  commandApprovalProbe.disabled = true;
+
+  try {
+    const submission = await requestRuntimeCommandApproval(
+      {
+        program: "cargo",
+        args: ["test"],
+        cwd: ".",
+        timeoutMs: 30_000,
+        network: "offline",
+      },
+      sessionId,
+      crypto.randomUUID(),
+    );
+
+    if (submission.status === "pending_manual_approval") {
+      appendApprovalRequestMessage(submission.pending.request);
+      setStatus("Command approval requested.");
+    } else {
+      setStatus(`Command allowed without manual approval: ${submission.request.summary}`);
+    }
+
+    await refreshApprovalList();
+    await refreshSessionList();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   } finally {

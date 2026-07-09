@@ -8,7 +8,10 @@ use commands::{
     run_tool_probe, select_workspace_path,
 };
 use core::{
-    approval::ApprovalRequestStore, run::AgentRunStore, session::JsonlSessionStore,
+    approval::ApprovalRequestStore,
+    run::AgentRunStore,
+    runtime::{HostCommandRunner, RuntimeCommandQueue},
+    session::JsonlSessionStore,
     workspace::WorkspaceSelectionStore,
 };
 use tauri::Manager;
@@ -18,6 +21,8 @@ pub fn run() {
         .manage(WorkspaceSelectionStore::default())
         .manage(AgentRunStore::default())
         .manage(ApprovalRequestStore::default())
+        .manage(RuntimeCommandQueue::default())
+        .manage(HostCommandRunner)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let session_root = app.path().app_data_dir()?.join("sessions");

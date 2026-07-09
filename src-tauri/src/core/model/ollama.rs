@@ -374,6 +374,8 @@ pub(crate) fn to_ollama_message(message: crate::core::messages::ConversationMess
             }
             MessagePart::ApprovalRequest { .. }
             | MessagePart::ApprovalDecision { .. }
+            | MessagePart::RuntimeCommandResult { .. }
+            | MessagePart::RuntimeCommandError { .. }
             | MessagePart::Diff { .. } => {}
         }
     }

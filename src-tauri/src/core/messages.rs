@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::core::runtime::{CommandResult, CommandSpec};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub id: Uuid,
@@ -27,6 +29,8 @@ pub enum MessagePart {
     ToolResult { result: ToolResult },
     ApprovalRequest { request: ApprovalRequestMessage },
     ApprovalDecision { decision: ApprovalDecisionMessage },
+    RuntimeCommandResult { result: RuntimeCommandResultMessage },
+    RuntimeCommandError { error: RuntimeCommandErrorMessage },
     Diff { diff: DiffMessage },
 }
 
@@ -61,6 +65,22 @@ pub struct ApprovalDecisionMessage {
     pub approved: bool,
     pub reviewer: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCommandResultMessage {
+    pub request_id: Uuid,
+    pub command: CommandSpec,
+    pub result: CommandResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCommandErrorMessage {
+    pub request_id: Uuid,
+    pub command: CommandSpec,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,15 +9,18 @@ use crate::core::agent::{
     AgentTurnResponse,
 };
 use crate::core::approval::{
-    submit_approval_request, ApprovalRequestStore, ApprovalSubmission, DefaultApprovalPolicy,
-    PendingApproval, ResolvedApproval,
+    submit_approval_request, ApprovalRequest, ApprovalRequestStore, ApprovalSubmission,
+    DefaultApprovalPolicy, PendingApproval, ResolvedApproval,
 };
 use crate::core::messages::{ConversationMessage, MessagePart, MessageRole, ToolCall, ToolResult};
 use crate::core::model::{
     ChatRequest, ModelBackend, OllamaBackend, OllamaConfig, ProbeOllamaResponse, ThinkMode,
 };
 use crate::core::run::{AgentRunStore, CancellationFlag};
-use crate::core::runtime::CommandSpec;
+use crate::core::runtime::{
+    CommandSpec, HostCommandRunner, QueuedRuntimeCommand, RuntimeCommandQueue,
+    RuntimeCommandResolution, RuntimeCommandRunner,
+};
 use crate::core::session::{
     CreateSessionRequest, JsonlSessionStore, SessionEvent, SessionId, SessionSnapshot,
     SessionStore, SessionSummary,
@@ -318,18 +321,89 @@ pub async fn list_pending_approvals(
 pub async fn request_runtime_command_approval(
     request: RuntimeCommandApprovalRequest,
     approvals: State<'_, ApprovalRequestStore>,
+    queued_commands: State<'_, RuntimeCommandQueue>,
+    command_runner: State<'_, HostCommandRunner>,
     sessions: State<'_, JsonlSessionStore>,
-) -> Result<ApprovalSubmission, String> {
-    submit_approval_request(
-        request.command.approval_request(),
-        Some(request.session_id),
-        request.run_id,
-        &DefaultApprovalPolicy,
+    selections: State<'_, WorkspaceSelectionStore>,
+) -> Result<RuntimeCommandApprovalSubmission, String> {
+    request_runtime_command_approval_core(
+        request,
         &approvals,
-        Some(&*sessions),
+        &queued_commands,
+        &sessions,
+        &selections,
+        &*command_runner,
+        &DefaultApprovalPolicy,
     )
     .await
     .map_err(|err| err.to_string())
+}
+
+async fn request_runtime_command_approval_core<P, R>(
+    request: RuntimeCommandApprovalRequest,
+    approvals: &ApprovalRequestStore,
+    queued_commands: &RuntimeCommandQueue,
+    sessions: &JsonlSessionStore,
+    selections: &WorkspaceSelectionStore,
+    command_runner: &R,
+    policy: &P,
+) -> crate::core::error::AppResult<RuntimeCommandApprovalSubmission>
+where
+    P: crate::core::approval::ApprovalPolicy,
+    R: RuntimeCommandRunner,
+{
+    let workspace = selections.get(request.workspace_id)?;
+    let resolved_cwd = workspace.resolve_existing_relative_path(&request.command.cwd.0)?;
+    if !resolved_cwd.is_dir() {
+        return Err(crate::core::error::AppError::InvalidConfig(format!(
+            "runtime command cwd is not a directory: {}",
+            request.command.cwd.display()
+        )));
+    }
+
+    let approval_request = request.command.approval_request();
+    let request_id = approval_request.id;
+    let queued = QueuedRuntimeCommand {
+        request_id,
+        session_id: request.session_id,
+        run_id: request.run_id,
+        workspace_id: request.workspace_id,
+        workspace_root: workspace.source_root().to_path_buf(),
+        resolved_cwd,
+        command: request.command,
+    };
+    queued_commands.insert(queued)?;
+
+    let submission = submit_approval_request(
+        approval_request,
+        Some(request.session_id),
+        request.run_id,
+        policy,
+        approvals,
+        Some(sessions),
+    )
+    .await;
+
+    match submission {
+        Ok(ApprovalSubmission::Allowed { request }) => {
+            let runtime_command = if let Some(command) = queued_commands.take(request_id)? {
+                Some(execute_runtime_command(command, command_runner, sessions).await?)
+            } else {
+                None
+            };
+            Ok(RuntimeCommandApprovalSubmission::Allowed {
+                request,
+                runtime_command,
+            })
+        }
+        Ok(ApprovalSubmission::PendingManualApproval { pending }) => {
+            Ok(RuntimeCommandApprovalSubmission::PendingManualApproval { pending })
+        }
+        Err(err) => {
+            let _ = queued_commands.remove(request_id);
+            Err(err)
+        }
+    }
 }
 
 #[tauri::command]
@@ -338,11 +412,37 @@ pub async fn resolve_approval(
     approved: bool,
     reason: String,
     approvals: State<'_, ApprovalRequestStore>,
+    queued_commands: State<'_, RuntimeCommandQueue>,
+    command_runner: State<'_, HostCommandRunner>,
     sessions: State<'_, JsonlSessionStore>,
-) -> Result<ResolvedApproval, String> {
-    let resolved = approvals
-        .prepare_resolution(request_id, approved, "user", reason)
-        .map_err(|err| err.to_string())?;
+) -> Result<ApprovalResolutionResponse, String> {
+    resolve_approval_core(
+        request_id,
+        approved,
+        reason,
+        &approvals,
+        &queued_commands,
+        &*command_runner,
+        &sessions,
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+async fn resolve_approval_core<R>(
+    request_id: Uuid,
+    approved: bool,
+    reason: String,
+    approvals: &ApprovalRequestStore,
+    queued_commands: &RuntimeCommandQueue,
+    command_runner: &R,
+    sessions: &JsonlSessionStore,
+) -> crate::core::error::AppResult<ApprovalResolutionResponse>
+where
+    R: RuntimeCommandRunner,
+{
+    let resolved = approvals.resolve(request_id, approved, "user", reason)?;
+    let queued_command = queued_commands.take(request_id)?;
 
     if let Some(session_id) = resolved.session_id {
         sessions
@@ -353,15 +453,23 @@ pub async fn resolve_approval(
                     decision: resolved.decision.clone(),
                 },
             )
-            .await
-            .map_err(|err| err.to_string())?;
+            .await?;
     }
 
-    approvals
-        .complete(request_id)
-        .map_err(|err| err.to_string())?;
+    let runtime_command = if resolved.decision.approved {
+        if let Some(command) = queued_command {
+            Some(execute_runtime_command(command, command_runner, sessions).await?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    Ok(resolved)
+    Ok(ApprovalResolutionResponse {
+        approval: resolved,
+        runtime_command,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,7 +488,32 @@ pub struct AgentTurnCommandRequest {
 pub struct RuntimeCommandApprovalRequest {
     pub session_id: SessionId,
     pub run_id: Option<Uuid>,
+    pub workspace_id: Uuid,
     pub command: CommandSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuntimeCommandApprovalSubmission {
+    Allowed {
+        request: ApprovalRequest,
+        runtime_command: Option<RuntimeCommandResolution>,
+    },
+    PendingManualApproval {
+        pending: PendingApproval,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalResolutionResponse {
+    #[serde(flatten)]
+    pub approval: ResolvedApproval,
+    pub runtime_command: Option<RuntimeCommandResolution>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,4 +531,379 @@ pub struct ToolProbeResponse {
     pub final_thinking: Option<String>,
     pub final_content: String,
     pub done_reason: Option<String>,
+}
+
+async fn execute_runtime_command(
+    command: QueuedRuntimeCommand,
+    runner: &impl RuntimeCommandRunner,
+    sessions: &JsonlSessionStore,
+) -> crate::core::error::AppResult<RuntimeCommandResolution> {
+    let message_id = Uuid::new_v4();
+    let request_id = command.request_id;
+    let session_id = command.session_id;
+    let run_id = command.run_id;
+    let command_spec = command.command.clone();
+
+    match runner.run(&command).await {
+        Ok(result) => {
+            sessions
+                .append_event(
+                    session_id,
+                    SessionEvent::RuntimeCommandCompleted {
+                        message_id,
+                        run_id,
+                        request_id,
+                        command: command_spec.clone(),
+                        result: result.clone(),
+                    },
+                )
+                .await?;
+            Ok(RuntimeCommandResolution::Completed {
+                message_id,
+                request_id,
+                command: command_spec,
+                result,
+            })
+        }
+        Err(err) => {
+            let message = err.to_string();
+            sessions
+                .append_event(
+                    session_id,
+                    SessionEvent::RuntimeCommandFailed {
+                        message_id,
+                        run_id,
+                        request_id,
+                        command: command_spec.clone(),
+                        message: message.clone(),
+                    },
+                )
+                .await?;
+            Ok(RuntimeCommandResolution::Failed {
+                message_id,
+                request_id,
+                command: command_spec,
+                message,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::approval::{ApprovalPolicy, ApprovalRequirement};
+    use crate::core::runtime::{CommandResult, NetworkPolicy, RelativePath};
+    use crate::core::session::TimestampedSessionEvent;
+    use crate::core::workspace::WorkspaceSelectionStore;
+    use async_trait::async_trait;
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
+
+    #[tokio::test]
+    async fn approved_runtime_command_runs_once_and_is_logged() {
+        let fixture = RuntimeApprovalFixture::new().await;
+        let submitted = fixture
+            .request(DefaultApprovalPolicy)
+            .await
+            .expect("request approval");
+        let request_id = match submitted {
+            RuntimeCommandApprovalSubmission::PendingManualApproval { pending } => {
+                pending.request.id
+            }
+            RuntimeCommandApprovalSubmission::Allowed { .. } => {
+                panic!("default command policy should require manual approval")
+            }
+        };
+
+        let resolved = resolve_approval_core(
+            request_id,
+            true,
+            "approved".to_string(),
+            &fixture.approvals,
+            &fixture.queued_commands,
+            &fixture.runner,
+            &fixture.sessions,
+        )
+        .await
+        .expect("resolve approval");
+
+        assert!(resolved.approval.decision.approved);
+        assert!(matches!(
+            resolved.runtime_command,
+            Some(RuntimeCommandResolution::Completed { request_id: resolved_request_id, .. })
+                if resolved_request_id == request_id
+        ));
+        assert_eq!(fixture.runner.calls(), 1);
+        assert!(fixture.approvals.list().expect("list approvals").is_empty());
+
+        let session = fixture
+            .sessions
+            .load_session(fixture.session_id)
+            .await
+            .expect("load session");
+        assert!(matches!(
+            session.events.as_slice(),
+            [
+                TimestampedSessionEvent {
+                    event: SessionEvent::ApprovalRequested { .. },
+                    ..
+                },
+                TimestampedSessionEvent {
+                    event: SessionEvent::ApprovalResolved { .. },
+                    ..
+                },
+                TimestampedSessionEvent {
+                    event: SessionEvent::RuntimeCommandCompleted { .. },
+                    ..
+                },
+            ]
+        ));
+    }
+
+    #[tokio::test]
+    async fn denied_runtime_command_is_not_executed() {
+        let fixture = RuntimeApprovalFixture::new().await;
+        let submitted = fixture
+            .request(DefaultApprovalPolicy)
+            .await
+            .expect("request approval");
+        let request_id = match submitted {
+            RuntimeCommandApprovalSubmission::PendingManualApproval { pending } => {
+                pending.request.id
+            }
+            RuntimeCommandApprovalSubmission::Allowed { .. } => {
+                panic!("default command policy should require manual approval")
+            }
+        };
+
+        let resolved = resolve_approval_core(
+            request_id,
+            false,
+            "denied".to_string(),
+            &fixture.approvals,
+            &fixture.queued_commands,
+            &fixture.runner,
+            &fixture.sessions,
+        )
+        .await
+        .expect("resolve approval");
+
+        assert!(!resolved.approval.decision.approved);
+        assert!(resolved.runtime_command.is_none());
+        assert_eq!(fixture.runner.calls(), 0);
+        assert!(fixture.approvals.list().expect("list approvals").is_empty());
+        assert!(fixture
+            .queued_commands
+            .take(request_id)
+            .expect("take queued command")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn duplicate_runtime_approval_resolution_does_not_log_second_decision() {
+        let fixture = RuntimeApprovalFixture::new().await;
+        let submitted = fixture
+            .request(DefaultApprovalPolicy)
+            .await
+            .expect("request approval");
+        let request_id = match submitted {
+            RuntimeCommandApprovalSubmission::PendingManualApproval { pending } => {
+                pending.request.id
+            }
+            RuntimeCommandApprovalSubmission::Allowed { .. } => {
+                panic!("default command policy should require manual approval")
+            }
+        };
+
+        resolve_approval_core(
+            request_id,
+            true,
+            "approved".to_string(),
+            &fixture.approvals,
+            &fixture.queued_commands,
+            &fixture.runner,
+            &fixture.sessions,
+        )
+        .await
+        .expect("resolve first approval");
+        let err = resolve_approval_core(
+            request_id,
+            true,
+            "approved again".to_string(),
+            &fixture.approvals,
+            &fixture.queued_commands,
+            &fixture.runner,
+            &fixture.sessions,
+        )
+        .await
+        .expect_err("second resolution should fail");
+
+        let session = fixture
+            .sessions
+            .load_session(fixture.session_id)
+            .await
+            .expect("load session");
+        let approval_resolved_count = session
+            .events
+            .iter()
+            .filter(|event| matches!(event.event, SessionEvent::ApprovalResolved { .. }))
+            .count();
+
+        assert!(err.to_string().contains("unknown approval request"));
+        assert_eq!(approval_resolved_count, 1);
+        assert_eq!(fixture.runner.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_allowed_runtime_command_executes_and_logs_immediately() {
+        let fixture = RuntimeApprovalFixture::new().await;
+        let submitted = fixture
+            .request(AllowAllPolicy)
+            .await
+            .expect("request approval");
+
+        assert!(matches!(
+            submitted,
+            RuntimeCommandApprovalSubmission::Allowed {
+                runtime_command: Some(RuntimeCommandResolution::Completed { .. }),
+                ..
+            }
+        ));
+        assert_eq!(fixture.runner.calls(), 1);
+        assert!(fixture.approvals.list().expect("list approvals").is_empty());
+
+        let session = fixture
+            .sessions
+            .load_session(fixture.session_id)
+            .await
+            .expect("load session");
+        assert!(matches!(
+            session.events.as_slice(),
+            [TimestampedSessionEvent {
+                event: SessionEvent::RuntimeCommandCompleted { .. },
+                ..
+            }]
+        ));
+    }
+
+    struct RuntimeApprovalFixture {
+        approvals: ApprovalRequestStore,
+        queued_commands: RuntimeCommandQueue,
+        sessions: JsonlSessionStore,
+        selections: WorkspaceSelectionStore,
+        runner: RecordingRunner,
+        session_id: SessionId,
+        workspace_id: Uuid,
+    }
+
+    impl RuntimeApprovalFixture {
+        async fn new() -> Self {
+            let workspace_root = test_dir("runtime-command-workspace");
+            fs::create_dir_all(&workspace_root).expect("create workspace");
+            let selections = WorkspaceSelectionStore::default();
+            let workspace = WorkspaceContext::new(&workspace_root).expect("workspace context");
+            let selection = selections.insert(workspace).expect("insert workspace");
+            let sessions = JsonlSessionStore::new(test_dir("runtime-command-sessions"));
+            let session = sessions
+                .create_session(CreateSessionRequest {
+                    title: "Runtime command".to_string(),
+                    workspace_root: Some(workspace_root.display().to_string()),
+                    base_url: None,
+                    model: None,
+                })
+                .await
+                .expect("create session");
+
+            Self {
+                approvals: ApprovalRequestStore::default(),
+                queued_commands: RuntimeCommandQueue::default(),
+                sessions,
+                selections,
+                runner: RecordingRunner::default(),
+                session_id: session.id,
+                workspace_id: selection.id,
+            }
+        }
+
+        async fn request<P>(
+            &self,
+            policy: P,
+        ) -> crate::core::error::AppResult<RuntimeCommandApprovalSubmission>
+        where
+            P: ApprovalPolicy,
+        {
+            request_runtime_command_approval_core(
+                RuntimeCommandApprovalRequest {
+                    session_id: self.session_id,
+                    run_id: Some(Uuid::new_v4()),
+                    workspace_id: self.workspace_id,
+                    command: CommandSpec {
+                        program: "test-command".to_string(),
+                        args: vec!["--flag".to_string()],
+                        cwd: RelativePath(PathBuf::from(".")),
+                        timeout_ms: 1_000,
+                        network: NetworkPolicy::Offline,
+                    },
+                },
+                &self.approvals,
+                &self.queued_commands,
+                &self.sessions,
+                &self.selections,
+                &self.runner,
+                &policy,
+            )
+            .await
+        }
+    }
+
+    #[derive(Debug, Default, Clone)]
+    struct RecordingRunner {
+        commands: Arc<Mutex<Vec<QueuedRuntimeCommand>>>,
+    }
+
+    impl RecordingRunner {
+        fn calls(&self) -> usize {
+            self.commands.lock().expect("runner lock").len()
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeCommandRunner for RecordingRunner {
+        async fn run(
+            &self,
+            command: &QueuedRuntimeCommand,
+        ) -> crate::core::error::AppResult<CommandResult> {
+            self.commands
+                .lock()
+                .expect("runner lock")
+                .push(command.clone());
+            Ok(CommandResult {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                duration_ms: 5,
+                timed_out: false,
+            })
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct AllowAllPolicy;
+
+    impl ApprovalPolicy for AllowAllPolicy {
+        fn evaluate(&self, _request: &ApprovalRequest) -> ApprovalRequirement {
+            ApprovalRequirement::Allow
+        }
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("ollama-cowork-command-tests")
+            .join(name)
+            .join(Uuid::new_v4().to_string())
+    }
 }

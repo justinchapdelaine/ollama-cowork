@@ -14,7 +14,9 @@ use crate::core::approval::{ApprovalDecision, ApprovalRequest};
 use crate::core::error::{AppError, AppResult};
 use crate::core::messages::{
     ApprovalDecisionMessage, ApprovalRequestMessage, ConversationMessage, MessagePart, MessageRole,
+    RuntimeCommandErrorMessage, RuntimeCommandResultMessage,
 };
+use crate::core::runtime::{CommandResult, CommandSpec};
 
 #[async_trait]
 pub trait SessionStore: Send + Sync {
@@ -262,6 +264,20 @@ pub enum SessionEvent {
         run_id: Option<Uuid>,
         decision: ApprovalDecision,
     },
+    RuntimeCommandCompleted {
+        message_id: Uuid,
+        run_id: Option<Uuid>,
+        request_id: Uuid,
+        command: CommandSpec,
+        result: CommandResult,
+    },
+    RuntimeCommandFailed {
+        message_id: Uuid,
+        run_id: Option<Uuid>,
+        request_id: Uuid,
+        command: CommandSpec,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,6 +327,34 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: SessionEvent, at_ms: u64) 
         SessionEvent::ApprovalResolved { decision, .. } => {
             snapshot.messages.push(approval_decision_message(decision));
         }
+        SessionEvent::RuntimeCommandCompleted {
+            message_id,
+            request_id,
+            command,
+            result,
+            ..
+        } => {
+            snapshot.messages.push(runtime_command_result_message(
+                *message_id,
+                *request_id,
+                command,
+                result,
+            ));
+        }
+        SessionEvent::RuntimeCommandFailed {
+            message_id,
+            request_id,
+            command,
+            message,
+            ..
+        } => {
+            snapshot.messages.push(runtime_command_error_message(
+                *message_id,
+                *request_id,
+                command,
+                message,
+            ));
+        }
         SessionEvent::AgentTurnFailed { .. } | SessionEvent::AgentTurnCancelled { .. } => {}
     }
 
@@ -355,6 +399,44 @@ fn approval_decision_message(decision: &ApprovalDecision) -> ConversationMessage
     }
 }
 
+fn runtime_command_result_message(
+    message_id: Uuid,
+    request_id: Uuid,
+    command: &CommandSpec,
+    result: &CommandResult,
+) -> ConversationMessage {
+    ConversationMessage {
+        id: message_id,
+        role: MessageRole::Tool,
+        parts: vec![MessagePart::RuntimeCommandResult {
+            result: RuntimeCommandResultMessage {
+                request_id,
+                command: command.clone(),
+                result: result.clone(),
+            },
+        }],
+    }
+}
+
+fn runtime_command_error_message(
+    message_id: Uuid,
+    request_id: Uuid,
+    command: &CommandSpec,
+    message: &str,
+) -> ConversationMessage {
+    ConversationMessage {
+        id: message_id,
+        role: MessageRole::Tool,
+        parts: vec![MessagePart::RuntimeCommandError {
+            error: RuntimeCommandErrorMessage {
+                request_id,
+                command: command.clone(),
+                message: message.to_string(),
+            },
+        }],
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -368,6 +450,7 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::core::approval::{ApprovalDecision, ApprovalSubject, RequestedCapability};
+    use crate::core::runtime::{NetworkPolicy, RelativePath};
 
     #[tokio::test]
     async fn jsonl_session_store_replays_completed_turns() {
@@ -555,6 +638,63 @@ mod tests {
         assert!(matches!(
             loaded.messages[1].parts.first(),
             Some(MessagePart::ApprovalDecision { decision }) if decision.approved
+        ));
+    }
+
+    #[tokio::test]
+    async fn jsonl_session_store_replays_runtime_command_results_as_messages() {
+        let store = JsonlSessionStore::new(test_session_dir());
+        let session = store
+            .create_session(CreateSessionRequest {
+                title: "Command session".to_string(),
+                workspace_root: None,
+                base_url: None,
+                model: None,
+            })
+            .await
+            .expect("create session");
+        let request_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let command = CommandSpec {
+            program: "cargo".to_string(),
+            args: vec!["test".to_string()],
+            cwd: RelativePath(PathBuf::from(".")),
+            timeout_ms: 30_000,
+            network: NetworkPolicy::Offline,
+        };
+        let result = CommandResult {
+            exit_code: Some(0),
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            duration_ms: 12,
+            timed_out: false,
+        };
+
+        store
+            .append_event(
+                session.id,
+                SessionEvent::RuntimeCommandCompleted {
+                    message_id,
+                    run_id: None,
+                    request_id,
+                    command: command.clone(),
+                    result: result.clone(),
+                },
+            )
+            .await
+            .expect("append command result");
+
+        let loaded = store.load_session(session.id).await.expect("load session");
+
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].id, message_id);
+        assert!(matches!(loaded.messages[0].role, MessageRole::Tool));
+        assert!(matches!(
+            loaded.messages[0].parts.first(),
+            Some(MessagePart::RuntimeCommandResult { result: message })
+                if message.request_id == request_id
+                    && message.command.program == command.program
+                    && message.result.exit_code == result.exit_code
         ));
     }
 

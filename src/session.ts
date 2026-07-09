@@ -60,6 +60,7 @@ export type PendingApproval = {
 export type ResolvedApproval = PendingApproval & {
   decision: ApprovalDecision;
   resolvedAtMs: number;
+  runtimeCommand?: RuntimeCommandResolution;
 };
 
 export type NetworkPolicy = "offline" | "approved_online";
@@ -72,8 +73,48 @@ export type RuntimeCommandSpec = {
   network: NetworkPolicy;
 };
 
+export type RuntimeCommandResult = {
+  exitCode?: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  timedOut: boolean;
+};
+
+export type RuntimeCommandResultMessage = {
+  requestId: string;
+  command: RuntimeCommandSpec;
+  result: RuntimeCommandResult;
+};
+
+export type RuntimeCommandErrorMessage = {
+  requestId: string;
+  command: RuntimeCommandSpec;
+  message: string;
+};
+
+export type RuntimeCommandResolution =
+  | {
+      status: "completed";
+      messageId: string;
+      requestId: string;
+      command: RuntimeCommandSpec;
+      result: RuntimeCommandResult;
+    }
+  | {
+      status: "failed";
+      messageId: string;
+      requestId: string;
+      command: RuntimeCommandSpec;
+      message: string;
+    };
+
 export type ApprovalSubmission =
-  | { status: "allowed"; request: ApprovalRequest }
+  | {
+      status: "allowed";
+      request: ApprovalRequest;
+      runtimeCommand?: RuntimeCommandResolution;
+    }
   | { status: "pending_manual_approval"; pending: PendingApproval };
 
 export type MessagePart =
@@ -83,6 +124,8 @@ export type MessagePart =
   | { type: "tool_result"; result: ToolResult }
   | { type: "approval_request"; request: ApprovalRequestMessage }
   | { type: "approval_decision"; decision: ApprovalDecisionMessage }
+  | { type: "runtime_command_result"; result: RuntimeCommandResultMessage }
+  | { type: "runtime_command_error"; error: RuntimeCommandErrorMessage }
   | { type: "diff"; diff: unknown };
 
 export type ConversationMessage = {
@@ -113,7 +156,23 @@ export type SessionEvent =
   | { type: "agent_turn_failed"; run_id: string; message: string }
   | { type: "agent_turn_cancelled"; run_id: string }
   | { type: "approval_requested"; run_id?: string; request: ApprovalRequest }
-  | { type: "approval_resolved"; run_id?: string; decision: ApprovalDecision };
+  | { type: "approval_resolved"; run_id?: string; decision: ApprovalDecision }
+  | {
+      type: "runtime_command_completed";
+      message_id: string;
+      run_id?: string;
+      request_id: string;
+      command: RuntimeCommandSpec;
+      result: RuntimeCommandResult;
+    }
+  | {
+      type: "runtime_command_failed";
+      message_id: string;
+      run_id?: string;
+      request_id: string;
+      command: RuntimeCommandSpec;
+      message: string;
+    };
 
 export type SessionSnapshot = {
   id: string;
@@ -330,12 +389,14 @@ export async function listPendingApprovals(): Promise<PendingApproval[]> {
 export async function requestRuntimeCommandApproval(
   command: RuntimeCommandSpec,
   sessionId: string,
+  workspaceId: string,
   runId?: string,
 ): Promise<ApprovalSubmission> {
   return invoke("request_runtime_command_approval", {
     request: {
       sessionId,
       runId,
+      workspaceId,
       command,
     },
   });

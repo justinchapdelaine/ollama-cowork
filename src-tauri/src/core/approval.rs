@@ -200,6 +200,37 @@ impl ApprovalRequestStore {
         })
     }
 
+    pub fn resolve(
+        &self,
+        request_id: Uuid,
+        approved: bool,
+        reviewer: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> AppResult<ResolvedApproval> {
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|err| AppError::Runtime(format!("approval store poisoned: {err}")))?
+            .remove(&request_id)
+            .ok_or_else(|| AppError::Runtime(format!("unknown approval request: {request_id}")))?;
+        let decision = ApprovalDecision {
+            id: Uuid::new_v4(),
+            request_id,
+            approved,
+            reviewer: reviewer.into(),
+            reason: reason.into(),
+        };
+
+        Ok(ResolvedApproval {
+            request: pending.request,
+            session_id: pending.session_id,
+            run_id: pending.run_id,
+            decision,
+            created_at_ms: pending.created_at_ms,
+            resolved_at_ms: now_ms(),
+        })
+    }
+
     pub fn complete(&self, request_id: Uuid) -> AppResult<()> {
         self.pending
             .lock()
@@ -365,6 +396,31 @@ mod tests {
         assert_eq!(store.list().expect("list before complete").len(), 1);
         store.complete(request_id).expect("complete approval");
         assert!(store.list().expect("list after resolve").is_empty());
+    }
+
+    #[test]
+    fn approval_store_resolve_removes_pending_atomically() {
+        let store = ApprovalRequestStore::default();
+        let request = tool_request(
+            "run_command",
+            vec![RequestedCapability::Command],
+            "run approved command",
+        );
+        let request_id = request.id;
+
+        store.request(request, None, None).expect("store request");
+
+        let resolved = store
+            .resolve(request_id, true, "user", "approved")
+            .expect("resolve once");
+        let err = store
+            .resolve(request_id, true, "user", "approved again")
+            .expect_err("second resolution should fail");
+
+        assert_eq!(resolved.decision.request_id, request_id);
+        assert!(resolved.decision.approved);
+        assert!(err.to_string().contains("unknown approval request"));
+        assert!(store.list().expect("list pending").is_empty());
     }
 
     #[test]

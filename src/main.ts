@@ -6,6 +6,7 @@ import {
   type ConversationMessage,
   type MessageRole,
   type PendingApproval,
+  type RuntimeCommandResolution,
   type SessionEvent,
   type SessionSummary,
   type ToolCall,
@@ -177,6 +178,7 @@ const sessions = new SessionController();
 let isRunning = false;
 let activeRunId: string | null = null;
 let activeRunHadModelEvents = false;
+const resolvingApprovalIds = new Set<string>();
 const activeRunMessageIds = new Set<string>();
 const activeRunAssistantMessageIds = new Set<string>();
 
@@ -214,7 +216,8 @@ function updateReadyState() {
     button.disabled = isRunning;
   }
   for (const button of approvalList?.querySelectorAll<HTMLButtonElement>("button") ?? []) {
-    button.disabled = isRunning;
+    const requestId = button.closest<HTMLElement>("[data-request-id]")?.dataset.requestId;
+    button.disabled = isRunning || (requestId ? resolvingApprovalIds.has(requestId) : false);
   }
 }
 
@@ -356,6 +359,12 @@ async function refreshApprovalList() {
 }
 
 async function resolvePendingApproval(requestId: string, approved: boolean) {
+  if (resolvingApprovalIds.has(requestId)) {
+    return;
+  }
+
+  resolvingApprovalIds.add(requestId);
+  updateReadyState();
   setStatus(approved ? "Approving request..." : "Denying request...");
   try {
     const resolved = await resolveApproval(
@@ -365,12 +374,27 @@ async function resolvePendingApproval(requestId: string, approved: boolean) {
     );
     if (resolved.sessionId === sessions.activeSessionId) {
       appendApprovalDecisionMessage(resolved.decision);
+      if (resolved.runtimeCommand) {
+        appendRuntimeCommandResolutionMessage(resolved.runtimeCommand);
+      }
     }
-    setStatus(approved ? "Approval granted." : "Approval denied.");
+    setStatus(
+      resolved.runtimeCommand
+        ? formatJson({
+            approval: approved ? "granted" : "denied",
+            runtime_command: resolved.runtimeCommand,
+          })
+        : approved
+          ? "Approval granted."
+          : "Approval denied.",
+    );
     await refreshApprovalList();
     await refreshSessionList();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    resolvingApprovalIds.delete(requestId);
+    updateReadyState();
   }
 }
 
@@ -413,6 +437,38 @@ function appendApprovalDecisionMessage(decision: ApprovalDecision) {
         },
       },
     ],
+  });
+  renderConversation();
+}
+
+function appendRuntimeCommandResolutionMessage(resolution: RuntimeCommandResolution) {
+  if (sessions.findMessage(resolution.messageId)) return;
+
+  sessions.appendMessage({
+    id: resolution.messageId,
+    role: "tool",
+    parts:
+      resolution.status === "completed"
+        ? [
+            {
+              type: "runtime_command_result",
+              result: {
+                requestId: resolution.requestId,
+                command: resolution.command,
+                result: resolution.result,
+              },
+            },
+          ]
+        : [
+            {
+              type: "runtime_command_error",
+              error: {
+                requestId: resolution.requestId,
+                command: resolution.command,
+                message: resolution.message,
+              },
+            },
+          ],
   });
   renderConversation();
 }
@@ -532,6 +588,16 @@ function renderMessage(message: ConversationMessage): HTMLElement {
           part.decision,
         ),
       );
+      continue;
+    }
+
+    if (part.type === "runtime_command_result") {
+      article.append(renderToolBlock("Runtime Command Result", part.result));
+      continue;
+    }
+
+    if (part.type === "runtime_command_error") {
+      article.append(renderToolBlock("Runtime Command Failed", part.error));
     }
   }
 
@@ -769,7 +835,8 @@ toolProbe?.addEventListener("click", async () => {
 
 commandApprovalProbe?.addEventListener("click", async () => {
   const sessionId = sessions.activeSessionId ?? undefined;
-  if (!sessionId || !commandApprovalProbe) {
+  const workspaceId = sessions.selectedWorkspaceId ?? undefined;
+  if (!sessionId || !workspaceId || !commandApprovalProbe) {
     setStatus("Choose a workspace folder before requesting command approval.");
     return;
   }
@@ -782,11 +849,12 @@ commandApprovalProbe?.addEventListener("click", async () => {
       {
         program: "cargo",
         args: ["test"],
-        cwd: ".",
+        cwd: "src-tauri",
         timeoutMs: 30_000,
         network: "offline",
       },
       sessionId,
+      workspaceId,
       crypto.randomUUID(),
     );
 
@@ -794,7 +862,17 @@ commandApprovalProbe?.addEventListener("click", async () => {
       appendApprovalRequestMessage(submission.pending.request);
       setStatus("Command approval requested.");
     } else {
-      setStatus(`Command allowed without manual approval: ${submission.request.summary}`);
+      if (submission.runtimeCommand) {
+        appendRuntimeCommandResolutionMessage(submission.runtimeCommand);
+      }
+      setStatus(
+        submission.runtimeCommand
+          ? formatJson({
+              approval: "auto_allowed",
+              runtime_command: submission.runtimeCommand,
+            })
+          : `Command allowed without manual approval: ${submission.request.summary}`,
+      );
     }
 
     await refreshApprovalList();

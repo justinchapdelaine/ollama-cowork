@@ -46,7 +46,7 @@ This document should answer "where are we, what did we decide, and what should h
 
 ## Current Implementation
 
-- Latest committed checkpoint: `aff8473` on `branch/init`, `feat(sessions): add recent session reloads`.
+- Latest committed checkpoint: `d33f963` on `branch/init`, `feat(runtime): add command approval requests`.
 - Tauri app launches with workspace picker, Ollama settings, diagnostics, and chat UI.
 - Ollama backend can probe `/api/version`, list `/api/tags`, and run both non-streaming and streaming `/api/chat` turns.
 - Agent loop supports thinking, tool calls, tool results, final assistant messages, bounded tool iterations, run-event streaming, and non-streaming fallback.
@@ -55,7 +55,7 @@ This document should answer "where are we, what did we decide, and what should h
 - Context compaction summarizes older history while preserving recent messages.
 - Read-only local tools support bounded file reads, file search, hidden/generated entry reporting, and cancellation checks.
 - UI renders conversation history, streaming thinking/content deltas, collapsible thinking, tool call/result blocks, status output, recent sessions, and responsive/narrow-window layouts; it creates a new durable session for each selected workspace, persists completed turns, and can reload saved sessions.
-- Approval/runtime scaffold work has started with typed capability categories, approval request/decision message shapes, default policy behavior, a policy-enforced tool boundary around read-only tools, pending approval storage, a reusable approval submission gate, session logging for requested/resolved approvals, a runtime command approval request command, and a basic manual approval UI surface.
+- Approval/runtime scaffold work has started with typed capability categories, approval request/decision message shapes, default policy behavior, a policy-enforced tool boundary around read-only tools, pending approval storage, atomic approval resolution, a reusable approval submission gate, session logging for requested/resolved approvals, a runtime command approval request command, a basic manual approval UI surface, a modular queued runtime command store, and a host command runner that executes approved or auto-allowed queued commands and logs stdout/stderr/exit code/timeout outcomes into session history.
 - Planning docs exist for sandboxing, engineering guidelines, skills/extensions, and MCP integration.
 
 ## Recent Test Evidence
@@ -77,7 +77,13 @@ This document should answer "where are we, what did we decide, and what should h
   - sent a new streamed prompt from the loaded session;
   - verified recent session controls were disabled during the active run;
   - verified the saved session updated in the recent list and reloaded with the last-used runtime settings.
-- Verification commands passed after the latest agent-loop work:
+- Approval/runtime smoke test passed against the real Tauri desktop window:
+  - selected the repo workspace through the native folder picker;
+  - requested a manual runtime command approval for `cargo test`;
+  - verified the pending approval appeared with the command capability and side-effecting reason;
+  - approved the request and verified it logged approval granted plus a runtime command result;
+  - verified the command ran with `cwd: "src-tauri"`, exit code 0, no timeout, and 50 Rust tests passed.
+- Verification commands passed after the latest implementation work:
   - `npm.cmd test`
   - `cargo fmt -- --check`
   - `cargo test`
@@ -92,7 +98,7 @@ This document should answer "where are we, what did we decide, and what should h
    - Add approval request/result message types in the session model.
    - Keep side-effecting capabilities disabled by default.
    - Keep reviewer, policy, session logging, and runtime execution boundaries modular.
-   - Next: attach the runtime command runner to approved decisions, then resume or deny queued actions based on the stored decision.
+   - Current next step: replace the temporary host runner with the copied-workspace runtime path once copy-then-patch is available, then route future sandbox runners behind the same command-runner boundary.
 
 2. Implement copy-then-patch.
    - Create a copied workspace runtime.

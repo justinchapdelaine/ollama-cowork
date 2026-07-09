@@ -138,6 +138,26 @@ fn summarize_message(message: &ConversationMessage) -> String {
                     decision.reason
                 ));
             }
+            MessagePart::RuntimeCommandResult { result } => {
+                parts.push(format!(
+                    "runtime command `{}` exited with {:?} in {} ms{}",
+                    result.command.program,
+                    result.result.exit_code,
+                    result.result.duration_ms,
+                    if result.result.timed_out {
+                        " and timed out"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            MessagePart::RuntimeCommandError { error } => {
+                parts.push(format!(
+                    "runtime command `{}` failed before completion: {}",
+                    error.command.program,
+                    truncate_for_summary(&error.message, SUMMARY_TEXT_LIMIT)
+                ));
+            }
             MessagePart::Diff { diff } => {
                 parts.push(format!("diff proposed: {}", diff.summary));
             }

@@ -1,3 +1,4 @@
+pub mod artifact_decoder;
 mod commands;
 mod config;
 mod contracts;

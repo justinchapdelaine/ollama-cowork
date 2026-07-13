@@ -14,20 +14,21 @@ impl ExclusiveDocxPublisher {
     pub fn new(max_bytes: u64) -> Self {
         Self { max_bytes }
     }
-    fn validate(&self, path: &Path) -> Result<(), BrokerError> {
-        let metadata = fs::metadata(path).map_err(|e| BrokerError::Publication(e.to_string()))?;
-        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > self.max_bytes {
-            return Err(BrokerError::Publication("artifact size is invalid".into()));
-        }
-        let file = fs::File::open(path).map_err(|e| BrokerError::Publication(e.to_string()))?;
-        let mut zip = ZipArchive::new(file)
-            .map_err(|e| BrokerError::Publication(format!("invalid DOCX ZIP: {e}")))?;
-        for name in ["[Content_Types].xml", "_rels/.rels", "word/document.xml"] {
-            zip.by_name(name)
-                .map_err(|_| BrokerError::Publication(format!("missing DOCX part {name}")))?;
-        }
-        Ok(())
+}
+
+pub fn validate_docx_artifact(path: &Path, max_bytes: u64) -> Result<(), BrokerError> {
+    let metadata = fs::metadata(path).map_err(|e| BrokerError::Publication(e.to_string()))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
+        return Err(BrokerError::Publication("artifact size is invalid".into()));
     }
+    let file = fs::File::open(path).map_err(|e| BrokerError::Publication(e.to_string()))?;
+    let mut zip = ZipArchive::new(file)
+        .map_err(|e| BrokerError::Publication(format!("invalid DOCX ZIP: {e}")))?;
+    for name in ["[Content_Types].xml", "_rels/.rels", "word/document.xml"] {
+        zip.by_name(name)
+            .map_err(|_| BrokerError::Publication(format!("missing DOCX part {name}")))?;
+    }
+    Ok(())
 }
 
 impl ArtifactPublisher for ExclusiveDocxPublisher {
@@ -36,7 +37,7 @@ impl ArtifactPublisher for ExclusiveDocxPublisher {
         private_artifact: &Path,
         publish_directory: &Path,
     ) -> Result<PathBuf, BrokerError> {
-        self.validate(private_artifact)?;
+        validate_docx_artifact(private_artifact, self.max_bytes)?;
         let directory = fs::canonicalize(publish_directory)
             .map_err(|e| BrokerError::Publication(e.to_string()))?;
         let source_name = private_artifact

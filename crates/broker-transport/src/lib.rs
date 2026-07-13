@@ -1,3 +1,7 @@
+mod client;
+
+pub use client::{BrokerAuthorizationClient, BrokerAuthorizationConfig, BrokerAuthorizationError};
+
 use ollama_cowork_core::{BROKER_SCHEMA_VERSION, BrokerOperation, BrokerRequest, BrokerResult};
 use serde::Deserialize;
 use serde_json::json;

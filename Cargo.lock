@@ -2087,10 +2087,12 @@ name = "ollama-cowork-broker-transport"
 version = "0.1.0"
 dependencies = [
  "ollama-cowork-core",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
  "subtle",
+ "thiserror 2.0.18",
  "tiny_http",
 ]
 
@@ -2115,8 +2117,11 @@ dependencies = [
  "ollama-cowork-opencode-client",
  "ollama-cowork-runtime",
  "serde",
+ "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
+ "tempfile",
 ]
 
 [[package]]

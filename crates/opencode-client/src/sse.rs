@@ -2,6 +2,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::io::BufRead;
 
+const MAX_SSE_FRAME_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct OpencodeEvent {
     #[serde(rename = "type")]
@@ -17,10 +19,12 @@ pub struct SseDecoder {
 
 impl SseDecoder {
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<OpencodeEvent>, String> {
-        const MAX_PENDING_FRAME_BYTES: usize = 1024 * 1024;
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
         while let Some((end, delimiter_len)) = frame_end(&self.buffer) {
+            if end > MAX_SSE_FRAME_BYTES {
+                return Err("SSE frame exceeds the configured limit".into());
+            }
             let frame = self.buffer.drain(..end).collect::<Vec<_>>();
             self.buffer.drain(..delimiter_len);
             let frame = std::str::from_utf8(&frame).map_err(|error| error.to_string())?;
@@ -37,7 +41,7 @@ impl SseDecoder {
                 })?;
             }
         }
-        if self.buffer.len() > MAX_PENDING_FRAME_BYTES {
+        if self.buffer.len() > MAX_SSE_FRAME_BYTES {
             return Err("SSE frame exceeds the configured limit".into());
         }
         Ok(events)
@@ -110,10 +114,18 @@ pub fn read_sse_cancellable(
                 }
             }
         } else if let Some(value) = line.strip_prefix("data:") {
+            let value = value.trim_start();
+            let next_length = data
+                .len()
+                .saturating_add(usize::from(!data.is_empty()))
+                .saturating_add(value.len());
+            if next_length > MAX_SSE_FRAME_BYTES {
+                return Err("SSE frame exceeds the configured limit".into());
+            }
             if !data.is_empty() {
                 data.push('\n')
             }
-            data.push_str(value.trim_start())
+            data.push_str(value)
         }
     }
     if !data.is_empty() {
@@ -164,6 +176,18 @@ mod tests {
     #[test]
     fn incremental_decoder_bounds_unterminated_frames() {
         let mut decoder = SseDecoder::default();
-        assert!(decoder.push(&vec![b'x'; 1024 * 1024 + 1]).is_err());
+        assert!(decoder.push(&vec![b'x'; MAX_SSE_FRAME_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn both_decoders_reject_terminated_oversized_frames() {
+        let mut frame = vec![b'x'; MAX_SSE_FRAME_BYTES + 1];
+        frame.extend_from_slice(b"\n\n");
+        let error = SseDecoder::default().push(&frame).unwrap_err();
+        assert_eq!(error, "SSE frame exceeds the configured limit");
+
+        let input = format!("data: {}\n\n", "x".repeat(MAX_SSE_FRAME_BYTES + 1));
+        let error = read_sse(input.as_bytes(), &mut |_| true).unwrap_err();
+        assert_eq!(error, "SSE frame exceeds the configured limit");
     }
 }

@@ -18,4 +18,9 @@ ollama-cowork-runtime = { path = "../../../crates/cowork-runtime" }
 ollama-cowork-broker-transport = { path = "../../../crates/broker-transport" }
 ollama-cowork-opencode-client = { path = "../../../crates/opencode-client" }
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tauri = { version = "=2.11.5", features = [] }
+
+[dev-dependencies]
+tempfile.workspace = true

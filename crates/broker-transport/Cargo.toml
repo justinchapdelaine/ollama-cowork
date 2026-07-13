@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 ollama-cowork-core = { path = "../cowork-core" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 tiny_http = "0.12.0"
+thiserror.workspace = true

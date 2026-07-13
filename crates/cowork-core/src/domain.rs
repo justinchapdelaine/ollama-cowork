@@ -44,6 +44,7 @@ pub struct DocumentJob {
     pub private_output_directory: PathBuf,
     pub publish_directory: PathBuf,
     pub approval: ApprovalState,
+    pub approval_action_id: Option<String>,
 }
 
 impl DocumentJob {
@@ -63,6 +64,7 @@ impl DocumentJob {
             private_output_directory,
             publish_directory,
             approval: ApprovalState::Pending,
+            approval_action_id: None,
         }
     }
     pub fn token_matches(&self, token: &str) -> bool {

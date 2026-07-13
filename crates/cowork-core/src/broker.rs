@@ -49,7 +49,12 @@ impl<R: SandboxRunner, P: ArtifactPublisher> ToolBroker<R, P> {
         self.jobs.insert(job.id.clone(), job);
         Ok(())
     }
-    pub fn decide(&mut self, job_id: &str, decision: ApprovalState) -> Result<(), BrokerError> {
+    pub fn decide(
+        &mut self,
+        job_id: &str,
+        action_id: &str,
+        decision: ApprovalState,
+    ) -> Result<(), BrokerError> {
         if !matches!(
             decision,
             ApprovalState::ApprovedOnce | ApprovalState::Rejected | ApprovalState::Cancelled
@@ -58,14 +63,37 @@ impl<R: SandboxRunner, P: ArtifactPublisher> ToolBroker<R, P> {
                 "invalid external approval decision",
             ));
         }
+        if action_id.trim().is_empty() {
+            return Err(BrokerError::InvalidOperation("empty approval action id"));
+        }
         let job = self.jobs.get_mut(job_id).ok_or(BrokerError::UnknownJob)?;
         if !matches!(job.approval, ApprovalState::Pending) {
             return Err(BrokerError::InvalidOperation(
                 "approval is already terminal",
             ));
         }
+        job.approval_action_id = Some(action_id.into());
         job.approval = decision;
         Ok(())
+    }
+
+    pub fn revoke_unconsumed(&mut self, job_id: &str, action_id: &str) -> Result<(), BrokerError> {
+        let job = self.jobs.get_mut(job_id).ok_or(BrokerError::UnknownJob)?;
+        if job.approval_action_id.as_deref() != Some(action_id) {
+            return Err(BrokerError::InvalidOperation(
+                "approval action does not match",
+            ));
+        }
+        match job.approval {
+            ApprovalState::Pending | ApprovalState::ApprovedOnce => {
+                job.approval = ApprovalState::Cancelled;
+                Ok(())
+            }
+            ApprovalState::Consumed => Err(BrokerError::ApprovalConsumed),
+            ApprovalState::Rejected | ApprovalState::Cancelled => Err(
+                BrokerError::InvalidOperation("approval is already terminal"),
+            ),
+        }
     }
     pub fn execute(&mut self, request: BrokerRequest) -> Result<BrokerResult, BrokerError> {
         if request.schema_version != BROKER_SCHEMA_VERSION {
@@ -244,7 +272,8 @@ mod tests {
     #[test]
     fn consumes_approval_before_execution() {
         let (mut b, _root) = broker();
-        b.decide("job", ApprovalState::ApprovedOnce).unwrap();
+        b.decide("job", "action", ApprovalState::ApprovedOnce)
+            .unwrap();
         assert!(b.execute(rewrite("secret")).is_ok());
         assert_eq!(b.approval("job"), Some(&ApprovalState::Consumed));
         assert_eq!(
@@ -257,7 +286,7 @@ mod tests {
     fn rejection_and_cancellation_do_not_execute() {
         for state in [ApprovalState::Rejected, ApprovalState::Cancelled] {
             let (mut b, _root) = broker();
-            b.decide("job", state.clone()).unwrap();
+            b.decide("job", "action", state.clone()).unwrap();
             assert!(b.execute(rewrite("secret")).is_err());
             assert_eq!(b.runner.calls.get(), 0);
         }
@@ -269,5 +298,29 @@ mod tests {
         r.source_sha256 = "old".into();
         assert_eq!(b.execute(r), Err(BrokerError::StaleSource));
         assert_eq!(b.runner.calls.get(), 0);
+    }
+
+    #[test]
+    fn revocation_is_action_correlated_and_denies_execution() {
+        let (mut b, _root) = broker();
+        b.decide("job", "expected-action", ApprovalState::ApprovedOnce)
+            .unwrap();
+        assert!(b.revoke_unconsumed("job", "wrong-action").is_err());
+        b.revoke_unconsumed("job", "expected-action").unwrap();
+        assert_eq!(b.execute(rewrite("secret")), Err(BrokerError::Cancelled));
+        assert_eq!(b.runner.calls.get(), 0);
+    }
+
+    #[test]
+    fn consumed_approval_cannot_be_revoked_or_reused() {
+        let (mut b, _root) = broker();
+        b.decide("job", "action", ApprovalState::ApprovedOnce)
+            .unwrap();
+        assert!(b.execute(rewrite("secret")).is_ok());
+        assert_eq!(
+            b.revoke_unconsumed("job", "action"),
+            Err(BrokerError::ApprovalConsumed)
+        );
+        assert_eq!(b.runner.calls.get(), 1);
     }
 }

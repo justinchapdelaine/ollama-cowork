@@ -32,6 +32,13 @@ pub struct ApprovalDecisionRequest {
     pub decision: ApprovalDecisionKind,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ApprovalRevocationRequest {
+    pub schema_version: u32,
+    pub job_id: String,
+    pub action_id: String,
+}
+
 pub fn authorized(header: Option<&str>, token: &str) -> bool {
     let expected = format!("Bearer {token}");
     let left: [u8; 32] = Sha256::digest(header.unwrap_or("").as_bytes()).into();
@@ -59,6 +66,7 @@ pub fn broker_request(
 
 pub trait BrokerService: Send {
     fn decide(&mut self, decision: ApprovalDecisionRequest) -> Result<(), String>;
+    fn revoke(&mut self, revocation: ApprovalRevocationRequest) -> Result<(), String>;
     fn execute(&mut self, operation: BrokerOperation) -> Result<BrokerResult, String>;
 }
 
@@ -101,8 +109,9 @@ pub fn serve_localhost(
             .iter()
             .find(|h| h.field.equiv("Authorization"))
             .map(|h| h.value.as_str());
-        let decision_route = request.method() == &Method::Post && request.url() == "/decision";
-        let expected_token = if decision_route {
+        let control_route =
+            request.method() == &Method::Post && matches!(request.url(), "/decision" | "/revoke");
+        let expected_token = if control_route {
             &config.control_auth_token
         } else {
             &config.execution_auth_token
@@ -115,7 +124,7 @@ pub fn serve_localhost(
             let _ = request.respond(response(200, json!({"schema_version":1,"healthy":true})));
             continue;
         }
-        if decision_route {
+        if control_route {
             let mut bytes = Vec::new();
             if request
                 .as_reader()
@@ -127,21 +136,26 @@ pub fn serve_localhost(
                 let _ = request.respond(response(400, json!({"error":"invalid_body"})));
                 continue;
             }
-            let decision: ApprovalDecisionRequest = match serde_json::from_slice(&bytes) {
-                Ok(value) => value,
-                Err(error) => {
-                    let _ = request.respond(response(
-                        400,
-                        json!({"error":"invalid_request","message":error.to_string()}),
-                    ));
-                    continue;
-                }
+            let result = if request.url() == "/decision" {
+                serde_json::from_slice::<ApprovalDecisionRequest>(&bytes)
+                    .map_err(|error| error.to_string())
+                    .and_then(|decision| {
+                        if decision.schema_version != BROKER_SCHEMA_VERSION {
+                            return Err("unsupported_schema".into());
+                        }
+                        service.decide(decision)
+                    })
+            } else {
+                serde_json::from_slice::<ApprovalRevocationRequest>(&bytes)
+                    .map_err(|error| error.to_string())
+                    .and_then(|revocation| {
+                        if revocation.schema_version != BROKER_SCHEMA_VERSION {
+                            return Err("unsupported_schema".into());
+                        }
+                        service.revoke(revocation)
+                    })
             };
-            if decision.schema_version != BROKER_SCHEMA_VERSION {
-                let _ = request.respond(response(400, json!({"error":"unsupported_schema"})));
-                continue;
-            }
-            match service.decide(decision) {
+            match result {
                 Ok(()) => {
                     let _ = request.respond(response(200, json!({"accepted":true})));
                 }

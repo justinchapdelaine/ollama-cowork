@@ -1,8 +1,8 @@
 mod config;
 use config::HostConfig;
 use ollama_cowork_broker_transport::{
-    ApprovalDecisionKind, ApprovalDecisionRequest, BrokerServerConfig, BrokerService,
-    serve_localhost,
+    ApprovalDecisionKind, ApprovalDecisionRequest, ApprovalRevocationRequest, BrokerServerConfig,
+    BrokerService, serve_localhost,
 };
 use ollama_cowork_core::{ApprovalState, BrokerOperation, BrokerResult, DocumentJob, ToolBroker};
 use ollama_cowork_runtime::{ExclusiveDocxPublisher, SrtRunner, SrtRunnerConfig};
@@ -28,7 +28,16 @@ impl BrokerService for JobService {
             ApprovalDecisionKind::Cancelled => ApprovalState::Cancelled,
         };
         self.broker
-            .decide(&self.job_id, state)
+            .decide(&self.job_id, &decision.action_id, state)
+            .map_err(|e| e.to_string())
+    }
+
+    fn revoke(&mut self, revocation: ApprovalRevocationRequest) -> Result<(), String> {
+        if revocation.job_id != self.job_id {
+            return Err("approval decision does not match the registered job".into());
+        }
+        self.broker
+            .revoke_unconsumed(&self.job_id, &revocation.action_id)
             .map_err(|e| e.to_string())
     }
 

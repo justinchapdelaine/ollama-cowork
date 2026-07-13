@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
+#[serde(
+    tag = "command",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorkflowCommand {
     Start {
         source: PathBuf,
@@ -34,6 +38,7 @@ pub enum JobStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionRequest {
     pub id: String,
     pub title: String,
@@ -42,6 +47,7 @@ pub struct ActionRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArtifactMetadata {
     pub path: PathBuf,
     pub media_type: String,
@@ -49,7 +55,11 @@ pub struct ArtifactMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[serde(
+    tag = "event",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorkflowEvent {
     StatusChanged {
         job_id: String,
@@ -82,23 +92,56 @@ pub trait WorkflowEventSink: Send + Sync {
     fn emit(&self, event: WorkflowEvent);
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MutationDecision {
+    ApprovedOnce,
+    Rejected,
+    Cancelled,
+}
+
+pub trait MutationAuthorization: Send {
+    fn decide(&mut self, action_id: &str, decision: MutationDecision) -> Result<(), String>;
+    fn revoke_unconsumed(&mut self, action_id: &str) -> Result<(), String>;
+}
+
+pub trait JobCleanup: Send {
+    /// Stops all job-scoped model, broker, and sandbox resources and revokes any
+    /// capability that has not already been consumed.
+    fn terminate(&mut self) -> Result<(), String>;
+}
+
+pub struct WorkflowJob<S, A, C> {
+    pub session: S,
+    pub authorization: A,
+    pub cleanup: C,
+}
+
+pub type WorkflowJobFor<F> = WorkflowJob<
+    <F as WorkflowJobFactory>::Session,
+    <F as WorkflowJobFactory>::Authorization,
+    <F as WorkflowJobFactory>::Cleanup,
+>;
+
+pub trait WorkflowJobFactory: Send + Sized {
+    type Session: ModelSession;
+    type Authorization: MutationAuthorization;
+    type Cleanup: JobCleanup;
+
+    /// Creates all job resources atomically. Implementations must clean up any
+    /// partially created resources before returning `Err`.
+    fn create(&mut self, job_id: &str, source: &Path) -> Result<WorkflowJobFor<Self>, String>;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelEvent {
     Text(String),
     ApprovalRequested {
         external_id: String,
-        tool: String,
         summary: String,
     },
-    ToolStarted {
-        external_id: String,
-        tool: String,
-    },
-    ToolCompleted {
-        external_id: String,
-        tool: String,
-        output: String,
-    },
+    ToolStarted,
+    ToolCompleted,
+    ArtifactReady(ArtifactMetadata),
     Idle,
     Failed {
         code: String,
@@ -124,6 +167,21 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("status_changed"));
+        assert!(json.contains("jobId"));
+        assert!(!json.contains("job_id"));
         assert!(!json.contains("opencode"));
+    }
+
+    #[test]
+    fn workflow_commands_use_frontend_safe_field_names() {
+        let command = WorkflowCommand::ApproveOnce {
+            job_id: "job".into(),
+            action_id: "action".into(),
+        };
+        let json = serde_json::to_string(&command).unwrap();
+        assert!(json.contains("approve_once"));
+        assert!(json.contains("jobId"));
+        assert!(json.contains("actionId"));
+        assert!(!json.contains("job_id"));
     }
 }

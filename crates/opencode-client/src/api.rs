@@ -1,11 +1,18 @@
-use crate::{OpencodeEvent, read_sse};
+use crate::{OpencodeEvent, SseDecoder};
+use futures_util::StreamExt;
 use reqwest::{
     Url,
     blocking::Client,
     header::{AUTHORIZATION, CONTENT_TYPE},
 };
 use serde_json::{Value, json};
-use std::{io::BufReader, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
@@ -30,6 +37,28 @@ pub enum OpencodeApiError {
 pub struct OpencodeApi {
     config: OpencodeApiConfig,
     client: Client,
+    stream_client: reqwest::Client,
+}
+
+#[derive(Clone, Default)]
+pub struct StreamCancellation {
+    cancelled: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl StreamCancellation {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+    async fn cancelled(&self) {
+        if !self.is_cancelled() {
+            self.notify.notified().await;
+        }
+    }
 }
 impl OpencodeApi {
     pub fn new(config: OpencodeApiConfig) -> Result<Self, OpencodeApiError> {
@@ -45,7 +74,14 @@ impl OpencodeApi {
             ));
         }
         let client = Client::builder().connect_timeout(config.timeout).build()?;
-        Ok(Self { config, client })
+        let stream_client = reqwest::Client::builder()
+            .connect_timeout(config.timeout)
+            .build()?;
+        Ok(Self {
+            config,
+            client,
+            stream_client,
+        })
     }
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.config.base_url.trim_end_matches('/'), path)
@@ -134,16 +170,59 @@ impl OpencodeApi {
             )?
             .json()?)
     }
-    pub fn stream_events(
+    pub async fn stream_events(
         &self,
+        cancellation: &StreamCancellation,
         mut callback: impl FnMut(OpencodeEvent) -> bool,
     ) -> Result<(), OpencodeApiError> {
-        let response = self.checked(
-            self.client
-                .get(self.url("/event"))
-                .header(AUTHORIZATION, &self.config.authorization)
-                .send()?,
-        )?;
-        read_sse(BufReader::new(response), &mut callback).map_err(OpencodeApiError::Sse)
+        let request = self
+            .stream_client
+            .get(self.url("/event"))
+            .header(AUTHORIZATION, &self.config.authorization)
+            .send();
+        let response = tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            response = request => response?,
+        };
+        let status = response.status();
+        if !status.is_success() {
+            return Err(OpencodeApiError::Status {
+                status: status.as_u16(),
+                body: response.text().await.unwrap_or_default(),
+            });
+        }
+        let mut decoder = SseDecoder::default();
+        let mut stream = response.bytes_stream();
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => return Ok(()),
+                chunk = stream.next() => match chunk {
+                    Some(Ok(chunk)) => {
+                        for event in decoder.push(&chunk).map_err(OpencodeApiError::Sse)? {
+                            if !callback(event) { return Ok(()); }
+                        }
+                    }
+                    Some(Err(error)) => return Err(OpencodeApiError::Http(error)),
+                    None => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_cancellation_wakes_waiters_within_a_bound() {
+        let cancellation = StreamCancellation::default();
+        let waiter = cancellation.clone();
+        let task = tokio::spawn(async move { waiter.cancelled().await });
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancellation waiter timed out")
+            .expect("cancellation waiter failed");
     }
 }

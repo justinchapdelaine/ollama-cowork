@@ -60,7 +60,9 @@ fn main() {
             published.clone(),
         ))
         .unwrap();
-    broker.decide("allow", ApprovalState::ApprovedOnce).unwrap();
+    broker
+        .decide("allow", "action", ApprovalState::ApprovedOnce)
+        .unwrap();
     let allowed = broker
         .execute(request("allow", token, &source_hash))
         .unwrap();
@@ -78,7 +80,9 @@ fn main() {
             reject_publish.clone(),
         ))
         .unwrap();
-    broker.decide("reject", ApprovalState::Rejected).unwrap();
+    broker
+        .decide("reject", "action", ApprovalState::Rejected)
+        .unwrap();
     let rejected = broker
         .execute(request("reject", token, &source_hash))
         .unwrap_err()
@@ -97,7 +101,9 @@ fn main() {
             cancel_publish.clone(),
         ))
         .unwrap();
-    broker.decide("cancel", ApprovalState::Cancelled).unwrap();
+    broker
+        .decide("cancel", "action", ApprovalState::Cancelled)
+        .unwrap();
     let cancelled = broker
         .execute(request("cancel", token, &source_hash))
         .unwrap_err()

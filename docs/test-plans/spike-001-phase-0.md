@@ -2,7 +2,7 @@
 
 Captured: 2026-07-12 (America/Vancouver)
 
-This is the immutable Phase 0 snapshot. Later sections and linked proof documents record how its initial blockers were resolved; current readiness is summarized in `SPIKE_001_PLAN.md`.
+This is the immutable Phase 0 snapshot. Later sections and linked proof documents record how its initial blockers were resolved; current readiness is summarized in the [Spike 001 plan](../spikes/spike-001-plan.md).
 
 ## Repository
 

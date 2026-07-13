@@ -69,13 +69,14 @@ ollama-cowork/
   README.md
   Cargo.toml                     # unified Rust workspace
   Cargo.lock                     # one locked dependency graph
-  SPIKE_001_PLAN.md
   crates/
     cowork-core/                 # domain policy, broker, normalized workflow contracts
     cowork-runtime/              # SRT runner + exclusive artifact publisher
     broker-transport/            # bounded authenticated localhost server
     opencode-client/             # pinned process, HTTP API subset, SSE parsing
   docs/
+    spikes/
+      spike-001-plan.md           # verified feasibility and implementation plan
     architecture/
       ADR-001-workspace-boundaries.md
       spike-001-proof-modularity.md

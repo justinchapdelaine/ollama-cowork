@@ -29,4 +29,4 @@ cargo test --workspace --locked
 git diff --check
 ```
 
-Spike evidence is intentionally retained. See `SPIKE_001_PLAN.md` and `docs/test-plans/`.
+Spike evidence is intentionally retained. See the [Spike 001 plan](docs/spikes/spike-001-plan.md) and [`docs/test-plans/`](docs/test-plans/).

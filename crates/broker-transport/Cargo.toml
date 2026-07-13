@@ -6,14 +6,14 @@ license.workspace = true
 
 [features]
 default = []
-server = ["dep:sha2", "dep:subtle", "dep:tiny_http"]
+server = ["dep:tiny_http"]
 
 [dependencies]
 ollama-cowork-core = { path = "../cowork-core" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = { workspace = true, optional = true }
-subtle = { workspace = true, optional = true }
+sha2.workspace = true
+subtle.workspace = true
 tiny_http = { version = "0.12.0", optional = true }
 thiserror.workspace = true

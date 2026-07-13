@@ -1,8 +1,8 @@
 # Spike 001 Feasibility Assessment and Implementation Plan
 
-Status: Tauri shell and modular workflow-composition foundation complete; concrete job runtime provisioning and controls are next
+Status: modular Tauri job runtime provisioning complete, security-hardened, and automated; narrow Tauri workflow commands and live integrated lifecycle validation are next
 Scope: one DOCX workflow using Tauri, opencode, remote Ollama, SRT, and clean-room DOCX tooling
-Verification date: 2026-07-11 (America/Vancouver)
+Verification date: 2026-07-13 (America/Vancouver)
 
 ## Executive recommendation
 
@@ -13,7 +13,7 @@ Spike 001's headless architecture is **feasible on the recorded host**, and the 
 3. remote Ollama discovery and a real opencode tool-call loop using `gemma4:12b`.
 4. a clean-room DOCX round trip through SRT that creates a revised copy and leaves the source byte-for-byte unchanged.
 
-Those gates, the trusted broker integration, allow/reject/abort behavior, reusable broker server, and Rust opencode client now pass with recorded evidence. Tauri implementation must reuse these boundaries rather than recreating them inside the desktop crate.
+Those gates, the trusted broker integration, allow/reject/abort behavior, reusable broker server, and Rust opencode client now pass with recorded evidence. The desktop composition layer reuses those boundaries and now constructs a supervised, isolated one-job runtime; it does not recreate broker, SRT, DOCX, or opencode-client policy.
 
 The architecture is viable in principle because current primary documentation confirms that:
 
@@ -143,7 +143,7 @@ Do not expose “run command,” arbitrary URL fetch, arbitrary path read/write,
 
 Define an `OpencodeRuntime` abstraction with two adapters:
 
-- `ManagedOpencode`: intended path. Rust selects a free loopback port, generates a random password, starts `opencode serve --hostname 127.0.0.1 --port <port>`, captures logs, polls `/global/health`, monitors exit, and kills the child tree on shutdown.
+- `ManagedOpencode`: intended path. Rust selects a free loopback port, generates a random password, starts `opencode serve --hostname 127.0.0.1 --port <port>`, captures bounded logs, requires the listener to be owned by the exact launched child PID, polls `/global/health`, monitors exit, and kills the child tree on shutdown.
 - `ExternalOpencode`: development-only adapter. It connects to an explicitly configured loopback URL and requires credentials. It must reject non-loopback URLs.
 
 Use the external adapter for the first API proof, then the managed adapter for the actual vertical slice. Do not use the JS SDK inside the WebView. A small Rust HTTP/SSE client based on the live OpenAPI schema keeps credentials and unrestricted endpoints behind the trusted host. Generate or hand-model only the API subset Spike 001 needs.
@@ -160,7 +160,7 @@ Use the external adapter for the first API proof, then the managed adapter for t
 
 Translate opencode events into product events such as `job_started`, `assistant_text`, `action_requested`, `action_started`, `artifact_ready`, and `job_failed`. The UI should never need to understand opencode part names or raw commands.
 
-The Rust host owns approval state. An opencode permission request is necessary but not sufficient: the host maps it to a known action, verifies its arguments and paths, displays a friendly summary, records a one-time decision, and only then responds. Do not expose opencode's session-level “always” choice in Spike 001.
+The Rust host owns approval state. An opencode permission request is necessary but not sufficient: the host parses the exact structured rewrite proposal, maps it to a known action, displays a friendly summary, binds the one-time decision to that operation, and only then responds. The broker rejects changed arguments without consuming approval. Do not expose opencode's session-level “always” choice in Spike 001.
 
 ### Trusted tool broker
 
@@ -591,8 +591,9 @@ No rendered document preview is required if LibreOffice is unavailable; a trustw
 - The narrow clean-room DOCX executable passes through SRT `0.0.65` on the synthetic fixture: it publishes a new copy, reopens and validates the package, preserves the adjacent section canary, rejects overwrite, leaves the source hash unchanged, and resets SRT cleanly.
 - The transport-independent Rust broker core is implemented in `crates/cowork-core`. Tests verify invalid token, pending approval, rejection, cancellation, stale hash, and approval reuse all fail before runner execution; a valid approval is consumed before execution.
 - The real broker/SRT/publication composition passes. `crates/cowork-runtime` provides the fixed SRT runner and exclusive DOCX publisher; `crates/broker-transport` owns reusable authenticated request translation and the blocking localhost server used inside the process-isolated broker host. An approved-once job produced a validated revised copy, while rejected and cancelled jobs produced no artifacts and the source hash remained unchanged.
-- Authenticated loopback transport and thin opencode DOCX-tool translation now pass end to end. Allow-once created exactly one artifact through opencode, the Rust broker, SRT, and the clean-room tool; reject and abort created none. The broker bound to `127.0.0.1` with distinct ephemeral execution and control credentials. Model-visible tools received only the execution credential and structured DOCX arguments; approval, rejection, and cancellation used a separate job/action-correlated control route, and execution could not approve itself. Evidence is in `docs/test-plans/spike-001-opencode-docx-proof.md` and its JSON result.
+- Authenticated loopback transport and thin opencode DOCX-tool translation now pass end to end. Allow-once created exactly one artifact through opencode, the Rust broker, SRT, and the clean-room tool; reject and abort created none. The broker bound to `127.0.0.1` with distinct ephemeral execution and control credentials. Model-visible tools received only the execution credential and structured DOCX arguments; approval, rejection, and cancellation use a separate control route, and current desktop authorization binds approval to the exact proposed rewrite. Execution cannot approve itself or substitute changed arguments. Evidence is in `docs/test-plans/spike-001-opencode-docx-proof.md` and its JSON result.
 - Final pre-Tauri modularization is complete: `cowork-core` exposes transport-neutral workflow commands/events and model-session ports; `broker-transport` owns authenticated localhost contracts/server behavior; `process-supervisor` owns kill-on-close child trees; and `opencode-client` owns pinned opencode management, the approved authenticated API subset, and SSE parsing. The Rust client passed live localhost health/session/message calls, and the complete headless allow/reject/abort proof remained green after extraction.
+- Desktop runtime construction is implemented behind replaceable workspace, secret, port, versioned tool-bundle/asset, process-launch, and readiness adapters. It starts separate supervised broker/opencode child trees, caps and drains child logs, attests exact listener ownership, clears and isolates the opencode environment, validates the provider implementation/base URL/exact model registration, selects a dedicated default-deny agent, transfers broker bootstrap secrets over inherited stdin, constructs independent model/authorization handles, and rolls back partial startup in reverse order. Automated evidence is in `docs/test-plans/spike-001-tauri-runtime-composition.md`; live invocation through Tauri commands remains pending.
 - The approval-gated custom-tool lifecycle is verified on opencode `1.17.18`. The tool must explicitly call `context.ask`; configuration `ask` alone does not gate replacement custom tools. Allow-once emitted `permission.asked`, accepted `once` through `/permission/:requestID/reply`, executed exactly once, emitted `permission.replied`, and became idle. Reject emitted the request/reply events and did not execute. Session abort returned `true`, emitted `session.error`, became idle, and did not execute. Evidence is in `docs/test-plans/spike-001-opencode-permission-proof.md` and its JSON result.
 - The configured LAN Ollama host was temporarily unreachable during one rerun on 2026-07-12 and later returned. The proof harness now performs a shared endpoint and exact-model preflight so availability failures are not misclassified as permission or model failures.
 
@@ -600,7 +601,7 @@ No rendered document preview is required if LibreOffice is unavailable; a trustw
 
 - Whether the proposed app-created workspace, isolated config locations, restrictive `OPENCODE_CONFIG_CONTENT`, dedicated agent, and live tool inventory fully prevent opencode user/global/project/managed configuration from widening capabilities.
 - Whether the Tauri composition exposes any model-reachable or WebView-reachable path outside the validated narrow API and tool set, including direct opencode shell/config endpoints.
-- Tauri child-process startup, readiness, cancellation, crash recovery, and shutdown behavior for the pinned opencode version on Windows.
+- Tauri-command-owned cancellation, crash recovery, and app shutdown behavior for the composed pinned opencode and broker-host process trees on Windows. The live provisioner now passes real broker/opencode startup, challenge-proven and process-tree-attested readiness, effective-profile validation, session/event-stream connection, listener/process cleanup, and transient-workspace removal; the same composition has not yet been driven through Tauri commands.
 - DOCX fidelity on a disposable, non-sensitive representative real-world fixture; the current acceptance proof intentionally covers only the synthetic narrow format.
 - LibreOffice availability, packaging, conversion fidelity, and containment.
 - Productized SRT installation/uninstallation, signing, upgrades, and helper placement; these remain outside Spike 001.
@@ -609,7 +610,7 @@ No rendered document preview is required if LibreOffice is unavailable; a trustw
 
 No remaining question blocks starting the minimal Tauri vertical slice. The following items must be resolved or validated before calling the desktop prototype complete:
 
-1. **Tauri configuration isolation:** Confirm that the desktop-created workspace, isolated profile/config locations, restrictive inline config, dedicated agent, and tool inventory preserve the proven default-deny posture when composed inside Tauri.
+1. **Tauri configuration isolation:** The desktop now generates isolated profile/config locations, clears the inherited child environment except for an explicit non-secret Windows compatibility allowlist, supplies restrictive global and dedicated-agent permissions, disables sharing/autoupdate, withholds broker control/job credentials from opencode, and fails startup if the effective config differs. The live provisioner passed this check against pinned opencode `1.17.18`; confirm the same result and tool inventory when invoked through Tauri commands.
 2. **Tauri authority surface:** Confirm that neither the WebView nor model can reach raw opencode shell, config mutation, filesystem, sharing, MCP mutation, or arbitrary broker routes.
 3. **Process lifecycle:** Prove startup readiness, cancellation, timeout, crash recovery, and shutdown for opencode, the broker server, and SRT-owned descendants from the packaged desktop process.
 4. **DOCX semantics and fidelity:** Keep the implemented exact single-`Heading1` behavior fail-closed for ambiguity and unsupported structures. Add one disposable, non-sensitive representative document for manual fidelity QA.

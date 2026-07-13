@@ -6,7 +6,7 @@ use ollama_cowork_broker_transport::{
 };
 use ollama_cowork_core::{ApprovalState, BrokerOperation, BrokerResult, DocumentJob, ToolBroker};
 use ollama_cowork_runtime::{ExclusiveDocxPublisher, SrtRunner, SrtRunnerConfig};
-use std::fs;
+use std::{fs, io::Read};
 
 struct JobService {
     broker: ToolBroker<SrtRunner, ExclusiveDocxPublisher>,
@@ -28,7 +28,7 @@ impl BrokerService for JobService {
             ApprovalDecisionKind::Cancelled => ApprovalState::Cancelled,
         };
         self.broker
-            .decide(&self.job_id, &decision.action_id, state)
+            .decide(&self.job_id, &decision.action_id, decision.operation, state)
             .map_err(|e| e.to_string())
     }
 
@@ -55,11 +55,21 @@ impl BrokerService for JobService {
 }
 
 fn main() {
-    let path = std::env::args_os()
+    let argument = std::env::args_os()
         .nth(1)
-        .expect("usage: broker-host <config.json>");
-    let config: HostConfig =
-        serde_json::from_slice(&fs::read(path).expect("read config")).expect("parse config");
+        .expect("usage: broker-host --config-stdin | <config.json>");
+    let bytes = if argument == "--config-stdin" {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .expect("read config from stdin");
+        assert!(bytes.len() <= 1024 * 1024, "broker config exceeds limit");
+        bytes
+    } else {
+        fs::read(argument).expect("read config")
+    };
+    let config: HostConfig = serde_json::from_slice(&bytes).expect("parse config");
     assert_eq!(config.schema_version, 1);
     let runner = SrtRunner::new(SrtRunnerConfig {
         node: config.node.clone(),

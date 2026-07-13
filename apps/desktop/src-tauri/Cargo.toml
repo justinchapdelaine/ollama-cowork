@@ -17,6 +17,8 @@ ollama-cowork-core = { path = "../../../crates/cowork-core" }
 ollama-cowork-runtime = { path = "../../../crates/cowork-runtime" }
 ollama-cowork-broker-transport = { path = "../../../crates/broker-transport" }
 ollama-cowork-opencode-client = { path = "../../../crates/opencode-client" }
+ollama-cowork-process-supervisor = { path = "../../../crates/process-supervisor" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

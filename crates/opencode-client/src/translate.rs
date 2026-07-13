@@ -1,5 +1,5 @@
 use crate::OpencodeEvent;
-use ollama_cowork_core::{ArtifactMetadata, ModelEvent};
+use ollama_cowork_core::{ArtifactMetadata, BrokerOperation, ModelEvent};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -67,9 +67,32 @@ impl OpencodeEventTranslator {
                 message: "opencode permission event omitted its request identifier".into(),
             });
         };
+        let metadata = properties.get("metadata");
+        let heading = metadata.and_then(|value| string(value, "heading"));
+        let paragraphs = metadata
+            .and_then(|value| value.get("replacement_paragraphs"))
+            .and_then(Value::as_array)
+            .and_then(|values| values.iter().map(Value::as_str).collect::<Option<Vec<_>>>());
+        if metadata.and_then(|value| string(value, "operation")) != Some("rewrite_section")
+            || heading.is_none_or(|value| value.trim().is_empty())
+            || paragraphs.as_ref().is_none_or(|values| values.is_empty())
+        {
+            return Some(ModelEvent::Failed {
+                code: "invalid_permission_event".into(),
+                message: "opencode permission event omitted the exact DOCX rewrite proposal".into(),
+            });
+        }
         Some(ModelEvent::ApprovalRequested {
             external_id: external_id.into(),
             summary: "Create a revised DOCX copy without changing the original.".into(),
+            operation: BrokerOperation::RewriteSection {
+                heading: heading.unwrap().into(),
+                replacement_paragraphs: paragraphs
+                    .unwrap()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            },
         })
     }
 
@@ -242,7 +265,7 @@ mod tests {
         let mut translator = translator();
         let allowed = translator.translate(event(
             "permission.asked",
-            json!({"sessionID":"session","id":"permission","permission":"docx_rewrite_section"}),
+            json!({"sessionID":"session","id":"permission","permission":"docx_rewrite_section","metadata":{"operation":"rewrite_section","heading":"Summary","replacement_paragraphs":["Revised"]}}),
         ));
         assert!(
             matches!(allowed.as_slice(), [ModelEvent::ApprovalRequested { external_id, .. }] if external_id == "permission")
@@ -254,6 +277,18 @@ mod tests {
         ));
         assert!(
             matches!(denied.as_slice(), [ModelEvent::Failed { code, .. }] if code == "unexpected_permission")
+        );
+    }
+
+    #[test]
+    fn rejects_permission_without_an_exact_operation_proposal() {
+        let mut translator = translator();
+        let translated = translator.translate(event(
+            "permission.asked",
+            json!({"sessionID":"session","id":"permission","permission":"docx_rewrite_section"}),
+        ));
+        assert!(
+            matches!(translated.as_slice(), [ModelEvent::Failed { code, .. }] if code == "invalid_permission_event")
         );
     }
 

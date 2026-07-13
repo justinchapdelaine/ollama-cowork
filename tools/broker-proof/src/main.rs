@@ -61,7 +61,12 @@ fn main() {
         ))
         .unwrap();
     broker
-        .decide("allow", "action", ApprovalState::ApprovedOnce)
+        .decide(
+            "allow",
+            "action",
+            request("allow", token, &source_hash).operation,
+            ApprovalState::ApprovedOnce,
+        )
         .unwrap();
     let allowed = broker
         .execute(request("allow", token, &source_hash))
@@ -81,7 +86,12 @@ fn main() {
         ))
         .unwrap();
     broker
-        .decide("reject", "action", ApprovalState::Rejected)
+        .decide(
+            "reject",
+            "action",
+            request("reject", token, &source_hash).operation,
+            ApprovalState::Rejected,
+        )
         .unwrap();
     let rejected = broker
         .execute(request("reject", token, &source_hash))
@@ -102,7 +112,12 @@ fn main() {
         ))
         .unwrap();
     broker
-        .decide("cancel", "action", ApprovalState::Cancelled)
+        .decide(
+            "cancel",
+            "action",
+            request("cancel", token, &source_hash).operation,
+            ApprovalState::Cancelled,
+        )
         .unwrap();
     let cancelled = broker
         .execute(request("cancel", token, &source_hash))

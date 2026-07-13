@@ -11,6 +11,10 @@ use std::{fmt, io::Read, time::Duration};
 use thiserror::Error;
 
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+const MAX_HEALTH_BODY_BYTES: usize = 64 * 1024;
+const MAX_CONFIG_BODY_BYTES: usize = 1024 * 1024;
+const MAX_SESSION_BODY_BYTES: usize = 256 * 1024;
+const MAX_MESSAGES_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct OpencodeApiConfig {
@@ -40,6 +44,15 @@ pub enum OpencodeApiError {
     Status { status: u16, body: String },
     #[error("opencode SSE error: {0}")]
     Sse(String),
+    #[error("opencode {route} response exceeded {limit} bytes")]
+    BodyTooLarge { route: &'static str, limit: usize },
+    #[error("opencode {route} returned invalid JSON: {message}")]
+    InvalidJson {
+        route: &'static str,
+        message: String,
+    },
+    #[error("opencode response body read failed: {0}")]
+    BodyRead(String),
 }
 
 pub struct OpencodeApi {
@@ -76,6 +89,10 @@ impl StreamCancellation {
     }
 }
 impl OpencodeApi {
+    pub fn base_url(&self) -> &str {
+        &self.config.base_url
+    }
+
     pub fn new(config: OpencodeApiConfig) -> Result<Self, OpencodeApiError> {
         let url = Url::parse(&config.base_url)
             .map_err(|e| OpencodeApiError::InvalidEndpoint(e.to_string()))?;
@@ -160,28 +177,64 @@ impl OpencodeApi {
             Err(OpencodeApiError::Status { status: code, body })
         }
     }
+
+    fn bounded_json(
+        response: reqwest::blocking::Response,
+        route: &'static str,
+        limit: usize,
+    ) -> Result<Value, OpencodeApiError> {
+        let mut bytes = Vec::new();
+        response
+            .take((limit + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| OpencodeApiError::BodyRead(error.to_string()))?;
+        if bytes.len() > limit {
+            return Err(OpencodeApiError::BodyTooLarge { route, limit });
+        }
+        serde_json::from_slice(&bytes).map_err(|error| OpencodeApiError::InvalidJson {
+            route,
+            message: error.to_string(),
+        })
+    }
     pub fn health(&self) -> Result<Value, OpencodeApiError> {
-        Ok(self
-            .checked(
+        Self::bounded_json(
+            self.checked(
                 self.client
                     .get(self.url("/global/health"))
                     .header(AUTHORIZATION, &self.config.authorization)
                     .timeout(self.config.timeout)
                     .send()?,
-            )?
-            .json()?)
+            )?,
+            "/global/health",
+            MAX_HEALTH_BODY_BYTES,
+        )
+    }
+    pub fn config(&self) -> Result<Value, OpencodeApiError> {
+        Self::bounded_json(
+            self.checked(
+                self.client
+                    .get(self.url("/config"))
+                    .header(AUTHORIZATION, &self.config.authorization)
+                    .timeout(self.config.timeout)
+                    .send()?,
+            )?,
+            "/config",
+            MAX_CONFIG_BODY_BYTES,
+        )
     }
     pub fn create_session(&self, title: &str) -> Result<Value, OpencodeApiError> {
-        Ok(self
-            .checked(
+        Self::bounded_json(
+            self.checked(
                 self.client
                     .post(self.url("/session"))
                     .header(AUTHORIZATION, &self.config.authorization)
                     .json(&json!({"title":title}))
                     .timeout(self.config.timeout)
                     .send()?,
-            )?
-            .json()?)
+            )?,
+            "/session",
+            MAX_SESSION_BODY_BYTES,
+        )
     }
     pub fn prompt_async(
         &self,
@@ -194,15 +247,21 @@ impl OpencodeApi {
         Ok(())
     }
     pub fn abort(&self, session_id: &str) -> Result<bool, OpencodeApiError> {
-        Ok(self
-            .checked(
+        let value = Self::bounded_json(
+            self.checked(
                 self.client
                     .post(self.url(&format!("/session/{session_id}/abort")))
                     .header(AUTHORIZATION, &self.config.authorization)
                     .timeout(self.config.timeout)
                     .send()?,
-            )?
-            .json()?)
+            )?,
+            "/session/:id/abort",
+            MAX_HEALTH_BODY_BYTES,
+        )?;
+        serde_json::from_value(value).map_err(|error| OpencodeApiError::InvalidJson {
+            route: "/session/:id/abort",
+            message: error.to_string(),
+        })
     }
     pub fn reply_permission(&self, request_id: &str, reply: &str) -> Result<(), OpencodeApiError> {
         if !matches!(reply, "once" | "reject") {
@@ -221,15 +280,17 @@ impl OpencodeApi {
         Ok(())
     }
     pub fn messages(&self, session_id: &str) -> Result<Value, OpencodeApiError> {
-        Ok(self
-            .checked(
+        Self::bounded_json(
+            self.checked(
                 self.client
                     .get(self.url(&format!("/session/{session_id}/message")))
                     .header(AUTHORIZATION, &self.config.authorization)
                     .timeout(self.config.timeout)
                     .send()?,
-            )?
-            .json()?)
+            )?,
+            "/session/:id/message",
+            MAX_MESSAGES_BODY_BYTES,
+        )
     }
     pub async fn stream_events(
         &self,
@@ -347,6 +408,34 @@ mod tests {
             error,
             OpencodeApiError::Status { status: 307, .. }
         ));
+    }
+
+    #[test]
+    fn rejects_oversized_successful_config_responses() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = vec![b' '; MAX_CONFIG_BODY_BYTES + 1];
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let api = OpencodeApi::new(config(&origin)).unwrap();
+        assert!(matches!(
+            api.config(),
+            Err(OpencodeApiError::BodyTooLarge {
+                route: "/config",
+                ..
+            })
+        ));
+        server.join().unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

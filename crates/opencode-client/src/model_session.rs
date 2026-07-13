@@ -452,7 +452,7 @@ mod tests {
     fn pump_translates_session_events_in_order() {
         let api = Arc::new(FakeApi::default());
         api.events.lock().unwrap().extend([
-            raw("permission.asked", json!({"sessionID":"session","id":"permission","permission":"docx_rewrite_section"})),
+            raw("permission.asked", json!({"sessionID":"session","id":"permission","permission":"docx_rewrite_section","metadata":{"operation":"rewrite_section","heading":"Summary","replacement_paragraphs":["Revised"]}})),
             raw("message.part.updated", json!({"part":{"sessionID":"session","type":"tool","tool":"docx_rewrite_section","callID":"call","state":{"status":"running"}}})),
             raw("message.part.updated", json!({"part":{"sessionID":"session","type":"tool","tool":"docx_rewrite_section","callID":"call","state":{"status":"completed","output":"artifact"}}})),
             raw("session.idle", json!({"sessionID":"session"})),
@@ -487,6 +487,12 @@ mod tests {
         ]);
         let mut session =
             OpencodeModelSession::start(api.clone(), api, config(1), translator()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while matches!(*session.pump_state.lock().unwrap(), PumpState::Running)
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
         assert!(
             matches!(wait_event(&mut session).unwrap(), ModelEvent::Text(text) if text == "one")
         );

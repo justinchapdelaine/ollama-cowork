@@ -1,4 +1,6 @@
-use ollama_cowork_core::{BROKER_SCHEMA_VERSION, MutationAuthorization, MutationDecision};
+use ollama_cowork_core::{
+    BROKER_SCHEMA_VERSION, BrokerOperation, MutationAuthorization, MutationDecision,
+};
 use reqwest::{Url, blocking::Client, header::AUTHORIZATION, redirect::Policy};
 use serde_json::{Value, json};
 use std::{fmt, io::Read, time::Duration};
@@ -96,7 +98,12 @@ impl BrokerAuthorizationClient {
 }
 
 impl MutationAuthorization for BrokerAuthorizationClient {
-    fn decide(&mut self, action_id: &str, decision: MutationDecision) -> Result<(), String> {
+    fn decide(
+        &mut self,
+        action_id: &str,
+        operation: &BrokerOperation,
+        decision: MutationDecision,
+    ) -> Result<(), String> {
         let decision = match decision {
             MutationDecision::ApprovedOnce => "approved_once",
             MutationDecision::Rejected => "rejected",
@@ -109,6 +116,7 @@ impl MutationAuthorization for BrokerAuthorizationClient {
                 "job_id": self.config.job_id,
                 "action_id": action_id,
                 "decision": decision,
+                "operation": operation,
             }),
         )
         .map_err(|error| error.to_string())
@@ -220,7 +228,14 @@ mod tests {
         let (origin, server) = capture_requests(2);
         let mut client = BrokerAuthorizationClient::new(config(&origin)).unwrap();
         client
-            .decide("action", MutationDecision::ApprovedOnce)
+            .decide(
+                "action",
+                &BrokerOperation::RewriteSection {
+                    heading: "Summary".into(),
+                    replacement_paragraphs: vec!["Revised".into()],
+                },
+                MutationDecision::ApprovedOnce,
+            )
             .unwrap();
         client.revoke_unconsumed("action").unwrap();
 
@@ -243,6 +258,11 @@ mod tests {
                 "job_id": "job",
                 "action_id": "action",
                 "decision": "approved_once",
+                "operation": {
+                    "operation": "rewrite_section",
+                    "heading": "Summary",
+                    "replacement_paragraphs": ["Revised"]
+                },
             })
         );
         let revocation: Value =

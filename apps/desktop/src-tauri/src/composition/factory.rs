@@ -106,12 +106,12 @@ mod tests {
             if self.0 {
                 return Err("secret generation failed".into());
             }
-            Ok(JobSecrets {
-                opencode_password: "11111111111111111111111111111111".into(),
-                broker_execution_token: "22222222222222222222222222222222".into(),
-                broker_control_token: "33333333333333333333333333333333".into(),
-                broker_job_token: "44444444444444444444444444444444".into(),
-            })
+            JobSecrets::new(
+                "11111111111111111111111111111111".into(),
+                "22222222222222222222222222222222".into(),
+                "33333333333333333333333333333333".into(),
+                "44444444444444444444444444444444".into(),
+            )
         }
     }
     struct Session;
@@ -131,7 +131,12 @@ mod tests {
     }
     struct Authorization;
     impl MutationAuthorization for Authorization {
-        fn decide(&mut self, _: &str, _: MutationDecision) -> Result<(), String> {
+        fn decide(
+            &mut self,
+            _: &str,
+            _: &ollama_cowork_core::BrokerOperation,
+            _: MutationDecision,
+        ) -> Result<(), String> {
             Ok(())
         }
         fn revoke_unconsumed(&mut self, _: &str) -> Result<(), String> {
@@ -156,7 +161,7 @@ mod tests {
         ) -> Result<ProvisionedRuntime, String> {
             assert!(request.workspace.model().is_dir());
             assert_eq!(
-                request.secrets.broker_job_token,
+                request.secrets.broker_bootstrap().job_token,
                 "44444444444444444444444444444444"
             );
             if self.fail {

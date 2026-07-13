@@ -1,3 +1,4 @@
+use crate::BrokerOperation;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -100,7 +101,12 @@ pub enum MutationDecision {
 }
 
 pub trait MutationAuthorization: Send {
-    fn decide(&mut self, action_id: &str, decision: MutationDecision) -> Result<(), String>;
+    fn decide(
+        &mut self,
+        action_id: &str,
+        operation: &BrokerOperation,
+        decision: MutationDecision,
+    ) -> Result<(), String>;
     fn revoke_unconsumed(&mut self, action_id: &str) -> Result<(), String>;
 }
 
@@ -138,6 +144,7 @@ pub enum ModelEvent {
     ApprovalRequested {
         external_id: String,
         summary: String,
+        operation: BrokerOperation,
     },
     ToolStarted,
     ToolCompleted,

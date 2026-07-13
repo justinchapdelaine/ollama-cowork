@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io,
     mem::size_of,
     os::windows::{io::AsRawHandle, process::CommandExt},
@@ -9,7 +10,8 @@ use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
     System::{
         Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         },
         JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -19,6 +21,42 @@ use windows_sys::Win32::{
         Threading::{CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
     },
 };
+
+pub fn is_process_descendant(process_id: u32, ancestor_id: u32) -> io::Result<bool> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let snapshot = OwnedHandle(snapshot);
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut parents = HashMap::new();
+    if unsafe { Process32FirstW(snapshot.0, &mut entry) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    loop {
+        parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+        if unsafe { Process32NextW(snapshot.0, &mut entry) } == 0 {
+            break;
+        }
+    }
+    let mut current = process_id;
+    for _ in 0..parents.len() {
+        let Some(parent) = parents.get(&current).copied() else {
+            return Ok(false);
+        };
+        if parent == ancestor_id {
+            return Ok(true);
+        }
+        if parent == 0 || parent == current {
+            return Ok(false);
+        }
+        current = parent;
+    }
+    Ok(false)
+}
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 

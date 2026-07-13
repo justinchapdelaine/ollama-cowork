@@ -53,6 +53,7 @@ impl<R: SandboxRunner, P: ArtifactPublisher> ToolBroker<R, P> {
         &mut self,
         job_id: &str,
         action_id: &str,
+        operation: BrokerOperation,
         decision: ApprovalState,
     ) -> Result<(), BrokerError> {
         if !matches!(
@@ -73,6 +74,7 @@ impl<R: SandboxRunner, P: ArtifactPublisher> ToolBroker<R, P> {
             ));
         }
         job.approval_action_id = Some(action_id.into());
+        job.approved_operation = Some(operation);
         job.approval = decision;
         Ok(())
     }
@@ -112,6 +114,9 @@ impl<R: SandboxRunner, P: ArtifactPublisher> ToolBroker<R, P> {
         validate_operation(&request.operation)?;
         let mutation = matches!(request.operation, BrokerOperation::RewriteSection { .. });
         if mutation {
+            if job.approved_operation.as_ref() != Some(&request.operation) {
+                return Err(BrokerError::ApprovalRequired);
+            }
             match job.approval {
                 ApprovalState::ApprovedOnce => job.approval = ApprovalState::Consumed,
                 ApprovalState::Rejected => return Err(BrokerError::Rejected),
@@ -272,8 +277,13 @@ mod tests {
     #[test]
     fn consumes_approval_before_execution() {
         let (mut b, _root) = broker();
-        b.decide("job", "action", ApprovalState::ApprovedOnce)
-            .unwrap();
+        b.decide(
+            "job",
+            "action",
+            rewrite("secret").operation,
+            ApprovalState::ApprovedOnce,
+        )
+        .unwrap();
         assert!(b.execute(rewrite("secret")).is_ok());
         assert_eq!(b.approval("job"), Some(&ApprovalState::Consumed));
         assert_eq!(
@@ -286,7 +296,8 @@ mod tests {
     fn rejection_and_cancellation_do_not_execute() {
         for state in [ApprovalState::Rejected, ApprovalState::Cancelled] {
             let (mut b, _root) = broker();
-            b.decide("job", "action", state.clone()).unwrap();
+            b.decide("job", "action", rewrite("secret").operation, state.clone())
+                .unwrap();
             assert!(b.execute(rewrite("secret")).is_err());
             assert_eq!(b.runner.calls.get(), 0);
         }
@@ -303,8 +314,13 @@ mod tests {
     #[test]
     fn revocation_is_action_correlated_and_denies_execution() {
         let (mut b, _root) = broker();
-        b.decide("job", "expected-action", ApprovalState::ApprovedOnce)
-            .unwrap();
+        b.decide(
+            "job",
+            "expected-action",
+            rewrite("secret").operation,
+            ApprovalState::ApprovedOnce,
+        )
+        .unwrap();
         assert!(b.revoke_unconsumed("job", "wrong-action").is_err());
         b.revoke_unconsumed("job", "expected-action").unwrap();
         assert_eq!(b.execute(rewrite("secret")), Err(BrokerError::Cancelled));
@@ -314,13 +330,39 @@ mod tests {
     #[test]
     fn consumed_approval_cannot_be_revoked_or_reused() {
         let (mut b, _root) = broker();
-        b.decide("job", "action", ApprovalState::ApprovedOnce)
-            .unwrap();
+        b.decide(
+            "job",
+            "action",
+            rewrite("secret").operation,
+            ApprovalState::ApprovedOnce,
+        )
+        .unwrap();
         assert!(b.execute(rewrite("secret")).is_ok());
         assert_eq!(
             b.revoke_unconsumed("job", "action"),
             Err(BrokerError::ApprovalConsumed)
         );
         assert_eq!(b.runner.calls.get(), 1);
+    }
+
+    #[test]
+    fn approval_is_bound_to_the_exact_rewrite_operation() {
+        let (mut b, _root) = broker();
+        let approved = rewrite("secret");
+        b.decide(
+            "job",
+            "action",
+            approved.operation.clone(),
+            ApprovalState::ApprovedOnce,
+        )
+        .unwrap();
+        let mut changed = approved;
+        changed.operation = BrokerOperation::RewriteSection {
+            heading: "Executive Summary".into(),
+            replacement_paragraphs: vec!["different text".into()],
+        };
+        assert_eq!(b.execute(changed), Err(BrokerError::ApprovalRequired));
+        assert_eq!(b.runner.calls.get(), 0);
+        assert_eq!(b.approval("job"), Some(&ApprovalState::ApprovedOnce));
     }
 }

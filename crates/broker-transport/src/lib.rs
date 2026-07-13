@@ -1,5 +1,29 @@
 mod client;
 
+use sha2::{Digest, Sha256};
+
+/// Produces an HMAC-SHA256 proof without disclosing the endpoint credential.
+pub fn broker_health_proof(token: &str, challenge: &str) -> String {
+    let mut key = token.as_bytes().to_vec();
+    if key.len() > 64 {
+        key = Sha256::digest(&key).to_vec();
+    }
+    key.resize(64, 0);
+    let mut inner_pad = [0x36_u8; 64];
+    let mut outer_pad = [0x5c_u8; 64];
+    for index in 0..64 {
+        inner_pad[index] ^= key[index];
+        outer_pad[index] ^= key[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(challenge.as_bytes());
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner.finalize());
+    format!("{:x}", outer.finalize())
+}
+
 pub use client::{BrokerAuthorizationClient, BrokerAuthorizationConfig, BrokerAuthorizationError};
 
 #[cfg(feature = "server")]
@@ -36,6 +60,7 @@ mod server {
         pub job_id: String,
         pub action_id: String,
         pub decision: ApprovalDecisionKind,
+        pub operation: BrokerOperation,
     }
 
     #[derive(Debug, Deserialize)]
@@ -121,6 +146,18 @@ mod server {
         service: &mut impl BrokerService,
         mut request: Request,
     ) {
+        if request.method() == &Method::Get
+            && let Some(challenge) = request.url().strip_prefix("/health?challenge=")
+            && challenge.len() == 64
+            && challenge.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            let proof = crate::broker_health_proof(&config.execution_auth_token, challenge);
+            let _ = request.respond(response(
+                200,
+                json!({"schema_version":1,"healthy":true,"proof":proof}),
+            ));
+            return;
+        }
         let auth = request
             .headers()
             .iter()
@@ -135,10 +172,6 @@ mod server {
         };
         if !authorized(auth, expected_token) {
             let _ = request.respond(response(401, json!({"error":"unauthorized"})));
-            return;
-        }
-        if request.method() == &Method::Get && request.url() == "/health" {
-            let _ = request.respond(response(200, json!({"schema_version":1,"healthy":true})));
             return;
         }
         if control_route {

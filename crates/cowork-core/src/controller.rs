@@ -1,6 +1,7 @@
 use crate::{
-    ActionRequest, JobCleanup, JobStatus, ModelEvent, ModelSession, MutationAuthorization,
-    MutationDecision, WorkflowCommand, WorkflowEvent, WorkflowEventSink, WorkflowJobFactory,
+    ActionRequest, BrokerOperation, JobCleanup, JobStatus, ModelEvent, ModelSession,
+    MutationAuthorization, MutationDecision, WorkflowCommand, WorkflowEvent, WorkflowEventSink,
+    WorkflowJobFactory,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -33,6 +34,7 @@ const MAX_JOB_EVENTS: usize = 16_384;
 struct ActiveAction {
     id: String,
     permission_id: String,
+    operation: BrokerOperation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,12 +157,12 @@ where
                 Ok(WorkflowReceipt { job_id })
             }
             WorkflowCommand::ApproveOnce { job_id, action_id } => {
-                let permission_id = self.pending_permission_id(&job_id, &action_id)?;
-                if let Err(_message) = self
-                    .active_job_mut(&job_id)?
-                    .authorization
-                    .decide(&action_id, MutationDecision::ApprovedOnce)
-                {
+                let (permission_id, operation) = self.pending_action(&job_id, &action_id)?;
+                if let Err(_message) = self.active_job_mut(&job_id)?.authorization.decide(
+                    &action_id,
+                    &operation,
+                    MutationDecision::ApprovedOnce,
+                ) {
                     let _ = self.active_job_mut(&job_id)?.session.cancel();
                     self.fail_active_job(
                         &job_id,
@@ -194,12 +196,12 @@ where
                 Ok(WorkflowReceipt { job_id })
             }
             WorkflowCommand::Reject { job_id, action_id } => {
-                let permission_id = self.pending_permission_id(&job_id, &action_id)?;
-                if let Err(_message) = self
-                    .active_job_mut(&job_id)?
-                    .authorization
-                    .decide(&action_id, MutationDecision::Rejected)
-                {
+                let (permission_id, operation) = self.pending_action(&job_id, &action_id)?;
+                if let Err(_message) = self.active_job_mut(&job_id)?.authorization.decide(
+                    &action_id,
+                    &operation,
+                    MutationDecision::Rejected,
+                ) {
                     let _ = self.active_job_mut(&job_id)?.session.cancel();
                     self.fail_active_job(
                         &job_id,
@@ -230,10 +232,17 @@ where
                     .as_ref()
                     .map(|action| action.id.clone())
                     .unwrap_or_else(|| "workflow-cancel".into());
-                let authorization_result = self
+                let operation = self
                     .active_job_mut(&job_id)?
-                    .authorization
-                    .decide(&action_id, MutationDecision::Cancelled);
+                    .action
+                    .as_ref()
+                    .map(|action| action.operation.clone())
+                    .unwrap_or(BrokerOperation::Inspect);
+                let authorization_result = self.active_job_mut(&job_id)?.authorization.decide(
+                    &action_id,
+                    &operation,
+                    MutationDecision::Cancelled,
+                );
                 let session_result = self.active_job_mut(&job_id)?.session.cancel();
                 if let Err(_message) = authorization_result.or(session_result) {
                     self.fail_active_job(
@@ -285,6 +294,7 @@ where
                 ModelEvent::ApprovalRequested {
                     external_id,
                     summary,
+                    operation,
                 } => {
                     let action_id = format!("action-{}", self.next_action);
                     self.next_action += 1;
@@ -300,6 +310,7 @@ where
                     job.action = Some(ActiveAction {
                         id: action_id.clone(),
                         permission_id: external_id,
+                        operation,
                     });
                     job.status = JobStatus::AwaitingApproval;
                     job.phase = JobPhase::AwaitingApproval;
@@ -395,11 +406,11 @@ where
         self.finished_jobs.remove(job_id)
     }
 
-    fn pending_permission_id(
+    fn pending_action(
         &mut self,
         job_id: &str,
         action_id: &str,
-    ) -> Result<String, WorkflowError> {
+    ) -> Result<(String, BrokerOperation), WorkflowError> {
         let job = self.active_job_mut(job_id)?;
         let action = job.action.as_ref().ok_or(WorkflowError::ActionMismatch)?;
         if action.id != action_id
@@ -408,7 +419,7 @@ where
         {
             return Err(WorkflowError::ActionMismatch);
         }
-        Ok(action.permission_id.clone())
+        Ok((action.permission_id.clone(), action.operation.clone()))
     }
 
     fn finish_active_job(&mut self, job_id: &str, status: JobStatus) -> Result<(), WorkflowError> {
@@ -516,7 +527,12 @@ mod tests {
     }
     struct Authorization(Arc<Mutex<Vec<String>>>);
     impl MutationAuthorization for Authorization {
-        fn decide(&mut self, action_id: &str, decision: MutationDecision) -> Result<(), String> {
+        fn decide(
+            &mut self,
+            action_id: &str,
+            _: &BrokerOperation,
+            decision: MutationDecision,
+        ) -> Result<(), String> {
             self.0
                 .lock()
                 .unwrap()
@@ -616,6 +632,12 @@ mod tests {
             .unwrap()
             .job_id
     }
+    fn rewrite_operation() -> BrokerOperation {
+        BrokerOperation::RewriteSection {
+            heading: "Summary".into(),
+            replacement_paragraphs: vec!["Revised".into()],
+        }
+    }
 
     #[test]
     fn approval_is_correlated_and_forwarded_once() {
@@ -623,6 +645,7 @@ mod tests {
             controller(vec![ModelEvent::ApprovalRequested {
                 external_id: "external".into(),
                 summary: "Create input.revised.docx".into(),
+                operation: rewrite_operation(),
             }]);
         let job = start(&mut controller);
         controller.poll(&job).unwrap();
@@ -657,6 +680,7 @@ mod tests {
         let (mut rejected, decisions, _, _) = controller(vec![ModelEvent::ApprovalRequested {
             external_id: "external".into(),
             summary: "rewrite".into(),
+            operation: rewrite_operation(),
         }]);
         let job = start(&mut rejected);
         rejected.poll(&job).unwrap();
@@ -698,6 +722,7 @@ mod tests {
             ModelEvent::ApprovalRequested {
                 external_id: "permission-id".into(),
                 summary: "rewrite".into(),
+                operation: rewrite_operation(),
             },
             ModelEvent::ToolStarted,
             ModelEvent::ToolCompleted,
@@ -829,6 +854,7 @@ mod tests {
                     vec![ModelEvent::ApprovalRequested {
                         external_id: "permission".into(),
                         summary: "rewrite".into(),
+                        operation: rewrite_operation(),
                     }]
                     .into(),
                 ),

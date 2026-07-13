@@ -1,5 +1,5 @@
 use ollama_cowork_core::{
-    JobCleanup, ModelEvent, ModelSession, MutationAuthorization, MutationDecision,
+    BrokerOperation, JobCleanup, ModelEvent, ModelSession, MutationAuthorization, MutationDecision,
 };
 
 pub struct DynModelSession(Box<dyn ModelSession>);
@@ -37,8 +37,13 @@ impl DynMutationAuthorization {
 }
 
 impl MutationAuthorization for DynMutationAuthorization {
-    fn decide(&mut self, action_id: &str, decision: MutationDecision) -> Result<(), String> {
-        self.0.decide(action_id, decision)
+    fn decide(
+        &mut self,
+        action_id: &str,
+        operation: &BrokerOperation,
+        decision: MutationDecision,
+    ) -> Result<(), String> {
+        self.0.decide(action_id, operation, decision)
     }
 
     fn revoke_unconsumed(&mut self, action_id: &str) -> Result<(), String> {

@@ -2,13 +2,74 @@ use std::fmt;
 
 /// Distinct, job-scoped credentials. Implementations must use a cryptographic RNG.
 pub struct JobSecrets {
-    pub opencode_password: String,
-    pub broker_execution_token: String,
-    pub broker_control_token: String,
-    pub broker_job_token: String,
+    opencode_password: String,
+    broker_execution_token: String,
+    broker_control_token: String,
+    broker_job_token: String,
 }
 
+pub struct ModelProcessSecrets<'a> {
+    pub opencode_password: &'a str,
+    pub broker_execution_token: &'a str,
+}
+
+pub struct BrokerBootstrapSecrets<'a> {
+    pub execution_token: &'a str,
+    pub control_token: &'a str,
+    pub job_token: &'a str,
+}
+
+pub struct BrokerControlSecret<'a>(pub &'a str);
+
 impl JobSecrets {
+    pub fn new(
+        opencode_password: String,
+        broker_execution_token: String,
+        broker_control_token: String,
+        broker_job_token: String,
+    ) -> Result<Self, String> {
+        let value = Self {
+            opencode_password,
+            broker_execution_token,
+            broker_control_token,
+            broker_job_token,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn model_process(&self) -> ModelProcessSecrets<'_> {
+        ModelProcessSecrets {
+            opencode_password: &self.opencode_password,
+            broker_execution_token: &self.broker_execution_token,
+        }
+    }
+
+    pub fn broker_bootstrap(&self) -> BrokerBootstrapSecrets<'_> {
+        BrokerBootstrapSecrets {
+            execution_token: &self.broker_execution_token,
+            control_token: &self.broker_control_token,
+            job_token: &self.broker_job_token,
+        }
+    }
+
+    pub fn broker_control(&self) -> BrokerControlSecret<'_> {
+        BrokerControlSecret(&self.broker_control_token)
+    }
+
+    pub fn redact(&self, value: &str) -> String {
+        [
+            &self.opencode_password,
+            &self.broker_execution_token,
+            &self.broker_control_token,
+            &self.broker_job_token,
+        ]
+        .into_iter()
+        .fold(value.to_owned(), |text, secret| {
+            text.replace(secret, "[REDACTED]")
+        })
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let values = [
             &self.opencode_password,
@@ -45,6 +106,21 @@ pub trait JobSecretsGenerator: Send {
     fn generate(&mut self) -> Result<JobSecrets, String>;
 }
 
+#[derive(Default)]
+pub struct SystemJobSecretsGenerator;
+
+impl JobSecretsGenerator for SystemJobSecretsGenerator {
+    fn generate(&mut self) -> Result<JobSecrets, String> {
+        fn secret() -> Result<String, String> {
+            let mut bytes = [0_u8; 32];
+            getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
+            Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+        }
+
+        JobSecrets::new(secret()?, secret()?, secret()?, secret()?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +154,20 @@ mod tests {
                 .is_err()
         );
         assert_eq!(format!("{:?}", secrets(valid)), "JobSecrets([REDACTED])");
+    }
+
+    #[test]
+    fn system_generator_creates_distinct_256_bit_credentials() {
+        let value = SystemJobSecretsGenerator.generate().unwrap();
+        value.validate().unwrap();
+        for secret in [
+            value.opencode_password,
+            value.broker_execution_token,
+            value.broker_control_token,
+            value.broker_job_token,
+        ] {
+            assert_eq!(secret.len(), 64);
+            assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
     }
 }

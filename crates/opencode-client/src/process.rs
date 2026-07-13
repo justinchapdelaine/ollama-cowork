@@ -3,6 +3,7 @@ use ollama_cowork_process_supervisor::ManagedChild;
 use std::{
     collections::HashMap,
     ffi::OsString,
+    fmt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -44,13 +45,36 @@ pub fn locate_executable(
         .unwrap_or_else(|| PathBuf::from(executable_name))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpencodeProcessConfig {
     pub executable: PathBuf,
     pub expected_version: String,
     pub workspace: PathBuf,
     pub port: u16,
+    /// Prevent inherited user configuration and credentials from entering the
+    /// managed server. Callers must provide every required environment value.
+    pub clear_environment: bool,
     pub environment: HashMap<String, String>,
+    pub stdout_log: Option<PathBuf>,
+    pub stderr_log: Option<PathBuf>,
+    pub log_limit_bytes: u64,
+}
+
+impl fmt::Debug for OpencodeProcessConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpencodeProcessConfig")
+            .field("executable", &self.executable)
+            .field("expected_version", &self.expected_version)
+            .field("workspace", &self.workspace)
+            .field("port", &self.port)
+            .field("clear_environment", &self.clear_environment)
+            .field("environment", &"[REDACTED]")
+            .field("stdout_log", &self.stdout_log)
+            .field("stderr_log", &self.stderr_log)
+            .field("log_limit_bytes", &self.log_limit_bytes)
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -83,6 +107,9 @@ impl OpencodeProcess {
     pub fn start(config: OpencodeProcessConfig) -> Result<Self, ProcessError> {
         require_version(&config.executable, &config.expected_version)?;
         let mut command = Command::new(config.executable);
+        if config.clear_environment {
+            command.env_clear();
+        }
         command
             .args([
                 "serve",
@@ -94,12 +121,26 @@ impl OpencodeProcess {
             ])
             .current_dir(config.workspace)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .envs(config.environment);
-        Ok(Self {
-            child: ManagedChild::spawn(&mut command)?,
-        })
+        let child = match (config.stdout_log.as_deref(), config.stderr_log.as_deref()) {
+            (Some(stdout), Some(stderr)) => ManagedChild::spawn_with_bounded_logs(
+                &mut command,
+                stdout,
+                stderr,
+                config.log_limit_bytes,
+            )?,
+            (None, None) => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+                ManagedChild::spawn(&mut command)?
+            }
+            _ => {
+                return Err(ProcessError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stdout and stderr logs must be configured together",
+                )));
+            }
+        };
+        Ok(Self { child })
     }
     pub fn id(&self) -> u32 {
         self.child.id()
@@ -108,6 +149,7 @@ impl OpencodeProcess {
         self.child.stop().map_err(ProcessError::Io)
     }
 }
+
 impl Drop for OpencodeProcess {
     fn drop(&mut self) {
         let _ = self.stop();
@@ -131,6 +173,24 @@ mod tests {
             locate_executable(Some(explicit.clone()), "opencode.exe", None, &[]),
             explicit
         );
+    }
+
+    #[test]
+    fn process_config_debug_redacts_the_child_environment() {
+        let config = OpencodeProcessConfig {
+            executable: "opencode.exe".into(),
+            expected_version: "1.2.3".into(),
+            workspace: "workspace".into(),
+            port: 43123,
+            clear_environment: true,
+            environment: HashMap::from([("SECRET".into(), "sensitive-value".into())]),
+            stdout_log: None,
+            stderr_log: None,
+            log_limit_bytes: 1024,
+        };
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sensitive-value"));
     }
 
     #[test]

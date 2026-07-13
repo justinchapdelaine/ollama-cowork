@@ -7,6 +7,6 @@ publish = false
 [dependencies]
 ollama-cowork-core = { path = "../../crates/cowork-core" }
 ollama-cowork-runtime = { path = "../../crates/cowork-runtime" }
-ollama-cowork-broker-transport = { path = "../../crates/broker-transport" }
+ollama-cowork-broker-transport = { path = "../../crates/broker-transport", features = ["server"] }
 serde.workspace = true
 serde_json.workspace = true

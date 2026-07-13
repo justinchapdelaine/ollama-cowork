@@ -1,5 +1,6 @@
 pub mod artifact_decoder;
 mod commands;
+pub mod composition;
 mod config;
 mod contracts;
 mod health;

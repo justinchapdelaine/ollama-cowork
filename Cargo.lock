@@ -2112,6 +2112,7 @@ dependencies = [
 name = "ollama-cowork-desktop"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "ollama-cowork-broker-transport",
  "ollama-cowork-core",
  "ollama-cowork-opencode-client",
@@ -2143,12 +2144,22 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "ollama-cowork-core",
+ "ollama-cowork-process-supervisor",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "ollama-cowork-process-supervisor"
+version = "0.1.0"
+dependencies = [
+ "ollama-cowork-core",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

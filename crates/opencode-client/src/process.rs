@@ -1,8 +1,10 @@
+use ollama_cowork_core::JobCleanup;
+use ollama_cowork_process_supervisor::ManagedChild;
 use std::{
     collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
 };
 use thiserror::Error;
 
@@ -60,7 +62,7 @@ pub enum ProcessError {
 }
 
 pub struct OpencodeProcess {
-    child: Child,
+    child: ManagedChild,
 }
 
 pub fn require_version(executable: &Path, expected: &str) -> Result<String, ProcessError> {
@@ -81,7 +83,6 @@ impl OpencodeProcess {
     pub fn start(config: OpencodeProcessConfig) -> Result<Self, ProcessError> {
         require_version(&config.executable, &config.expected_version)?;
         let mut command = Command::new(config.executable);
-        configure_background_process(&mut command);
         command
             .args([
                 "serve",
@@ -97,23 +98,25 @@ impl OpencodeProcess {
             .stderr(Stdio::null())
             .envs(config.environment);
         Ok(Self {
-            child: command.spawn()?,
+            child: ManagedChild::spawn(&mut command)?,
         })
     }
     pub fn id(&self) -> u32 {
         self.child.id()
     }
     pub fn stop(&mut self) -> Result<(), ProcessError> {
-        if self.child.try_wait()?.is_none() {
-            self.child.kill()?;
-            self.child.wait()?;
-        }
-        Ok(())
+        self.child.stop().map_err(ProcessError::Io)
     }
 }
 impl Drop for OpencodeProcess {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+impl JobCleanup for OpencodeProcess {
+    fn terminate(&mut self) -> Result<(), String> {
+        self.stop().map_err(|error| error.to_string())
     }
 }
 

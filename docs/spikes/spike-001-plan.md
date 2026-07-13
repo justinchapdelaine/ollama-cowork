@@ -1,6 +1,6 @@
 # Spike 001 Feasibility Assessment and Implementation Plan
 
-Status: Tauri vertical slice milestone 1 complete; workflow composition and controls are next
+Status: Tauri shell and modular workflow-composition foundation complete; concrete job runtime provisioning and controls are next
 Scope: one DOCX workflow using Tauri, opencode, remote Ollama, SRT, and clean-room DOCX tooling
 Verification date: 2026-07-11 (America/Vancouver)
 
@@ -72,8 +72,9 @@ ollama-cowork/
   crates/
     cowork-core/                 # domain policy, broker, normalized workflow contracts
     cowork-runtime/              # SRT runner + exclusive artifact publisher
-    broker-transport/            # bounded authenticated localhost server
+    broker-transport/            # authenticated localhost protocol/server
     opencode-client/             # pinned process, HTTP API subset, SSE parsing
+    process-supervisor/          # kill-on-close job-scoped process trees
   docs/
     spikes/
       spike-001-plan.md           # verified feasibility and implementation plan
@@ -93,7 +94,7 @@ ollama-cowork/
         capabilities/              # least-privilege Tauri capabilities
   tools/
     docx-tool/                     # standalone clean-room DOCX executable
-    broker-host/                   # proof/development composition host
+    broker-host/                   # narrow process-isolated one-job host
     broker-proof/                  # integration proof executable
   scripts/
     runtime/                       # fixed SRT bridge
@@ -112,6 +113,7 @@ Keep dependencies pointing inward through small interfaces:
 ```text
 WebView -> narrow Tauri commands -> cowork-core workflow contracts/services
 desktop composition -> opencode-client / broker-transport / cowork-runtime
+opencode-client + broker host lifecycle -> process-supervisor
 opencode custom tools -> authenticated broker-transport -> cowork-core ToolBroker
 cowork-runtime implements SandboxRunner / ArtifactPublisher ports
 SRT -> standalone clean-room docx-tool
@@ -588,9 +590,9 @@ No rendered document preview is required if LibreOffice is unavailable; a trustw
 - The SRT Windows policy and helper placement remained effective behind the Rust broker and clean-room DOCX runtime.
 - The narrow clean-room DOCX executable passes through SRT `0.0.65` on the synthetic fixture: it publishes a new copy, reopens and validates the package, preserves the adjacent section canary, rejects overwrite, leaves the source hash unchanged, and resets SRT cleanly.
 - The transport-independent Rust broker core is implemented in `crates/cowork-core`. Tests verify invalid token, pending approval, rejection, cancellation, stale hash, and approval reuse all fail before runner execution; a valid approval is consumed before execution.
-- The real broker/SRT/publication composition passes. `crates/cowork-runtime` provides the fixed SRT runner and exclusive DOCX publisher; `crates/broker-transport` owns reusable authenticated request translation and bounded localhost server lifecycle. An approved-once job produced a validated revised copy, while rejected and cancelled jobs produced no artifacts and the source hash remained unchanged.
+- The real broker/SRT/publication composition passes. `crates/cowork-runtime` provides the fixed SRT runner and exclusive DOCX publisher; `crates/broker-transport` owns reusable authenticated request translation and the blocking localhost server used inside the process-isolated broker host. An approved-once job produced a validated revised copy, while rejected and cancelled jobs produced no artifacts and the source hash remained unchanged.
 - Authenticated loopback transport and thin opencode DOCX-tool translation now pass end to end. Allow-once created exactly one artifact through opencode, the Rust broker, SRT, and the clean-room tool; reject and abort created none. The broker bound to `127.0.0.1` with distinct ephemeral execution and control credentials. Model-visible tools received only the execution credential and structured DOCX arguments; approval, rejection, and cancellation used a separate job/action-correlated control route, and execution could not approve itself. Evidence is in `docs/test-plans/spike-001-opencode-docx-proof.md` and its JSON result.
-- Final pre-Tauri modularization is complete: `cowork-core` exposes transport-neutral workflow commands/events and model-session ports; `broker-transport` owns reusable bounded localhost server lifecycle; and `opencode-client` owns pinned process management, the approved authenticated API subset, and SSE parsing. The Rust client passed live localhost health/session/message calls, and the complete headless allow/reject/abort proof remained green after extraction.
+- Final pre-Tauri modularization is complete: `cowork-core` exposes transport-neutral workflow commands/events and model-session ports; `broker-transport` owns authenticated localhost contracts/server behavior; `process-supervisor` owns kill-on-close child trees; and `opencode-client` owns pinned opencode management, the approved authenticated API subset, and SSE parsing. The Rust client passed live localhost health/session/message calls, and the complete headless allow/reject/abort proof remained green after extraction.
 - The approval-gated custom-tool lifecycle is verified on opencode `1.17.18`. The tool must explicitly call `context.ask`; configuration `ask` alone does not gate replacement custom tools. Allow-once emitted `permission.asked`, accepted `once` through `/permission/:requestID/reply`, executed exactly once, emitted `permission.replied`, and became idle. Reject emitted the request/reply events and did not execute. Session abort returned `true`, emitted `session.error`, became idle, and did not execute. Evidence is in `docs/test-plans/spike-001-opencode-permission-proof.md` and its JSON result.
 - The configured LAN Ollama host was temporarily unreachable during one rerun on 2026-07-12 and later returned. The proof harness now performs a shared endpoint and exact-model preflight so availability failures are not misclassified as permission or model failures.
 

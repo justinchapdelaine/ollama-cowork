@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ollama-cowork-core = { path = "../cowork-core" }
+ollama-cowork-process-supervisor = { path = "../process-supervisor" }
 reqwest.workspace = true
 futures-util.workspace = true
 serde.workspace = true

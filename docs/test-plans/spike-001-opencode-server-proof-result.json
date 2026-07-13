@@ -1,0 +1,44 @@
+{
+    "generated_at":  "2026-07-12T10:24:36.5115887Z",
+    "opencode_version":  "1.17.18",
+    "executable_sha256":  "D78D0999EADDF4BAE028FFA88106D37F5962931BB9137396D8C5FD77576DD68D",
+    "base_url":  "http://127.0.0.1:40961",
+    "pure_mode":  true,
+    "auto_mode":  false,
+    "unauthenticated_health_status":  401,
+    "authenticated_health":  {
+                                 "healthy":  true,
+                                 "version":  "1.17.18"
+                             },
+    "doc_status":  200,
+    "effective_permission":  {
+                                 "*":  "deny"
+                             },
+    "configured_model":  "ollama-lan/gemma4:12b",
+    "tool_ids":  [
+                     "invalid",
+                     "question",
+                     "bash",
+                     "read",
+                     "glob",
+                     "grep",
+                     "edit",
+                     "write",
+                     "task",
+                     "webfetch",
+                     "todowrite",
+                     "websearch",
+                     "skill",
+                     "apply_patch",
+                     "bash"
+                 ],
+    "custom_bash_override_confirmed":  true,
+    "listeners":  [
+                      {
+                          "LocalAddress":  "127.0.0.1",
+                          "LocalPort":  40961,
+                          "OwningProcess":  632
+                      }
+                  ],
+    "passed":  true
+}

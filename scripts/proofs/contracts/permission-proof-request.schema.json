@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ollama-cowork.local/schemas/spike-001/permission-proof-request-v1.json",
+  "title": "Spike 001 permission proof request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "base_url", "authorization", "session_id", "action", "token", "tool_name", "argument_name", "execution_marker", "result_path"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "base_url": { "type": "string", "pattern": "^http://127\\.0\\.0\\.1:[0-9]+$" },
+    "authorization": { "type": "string", "pattern": "^Basic " },
+    "session_id": { "type": "string", "minLength": 1 },
+    "action": { "enum": ["once", "reject", "abort"] },
+    "token": { "type": "string", "pattern": "^[A-Z0-9_-]{8,64}$" },
+    "tool_name": { "type": "string", "minLength": 1 },
+    "argument_name": { "type": "string", "minLength": 1 },
+    "execution_marker": { "type": "string", "minLength": 1 },
+    "result_path": { "type": "string", "minLength": 1 },
+    "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 300000 }
+  }
+}

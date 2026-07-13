@@ -1,0 +1,20 @@
+{
+  "allowed": {
+    "artifact": "\\\\?\\C:\\Users\\<user>\\AppData\\Local\\Temp\\.tmp0pWj5i\\published\\allow.revised.docx",
+    "job_id": "allow",
+    "result": "{\"status\":\"rewritten\",\"schema_version\":1,\"source_sha256\":\"6c692abedd83e1f74fb9313a41790a977483bb4202691d87a5618cf3727b7a29\",\"output_sha256\":\"ae0bbdd9260da778cf957b66574ea73d9b7e59b0509bf1cc04539f8781c5eb05\",\"output\":\"\\\\\\\\?\\\\C:\\\\Users\\\\<user>\\\\AppData\\\\Local\\\\Temp\\\\.tmp0pWj5i\\\\private\\\\allow.revised.docx\",\"heading\":\"Executive Summary\",\"replaced_paragraph_count\":2}",
+    "schema_version": 1
+  },
+  "cancelled": {
+    "artifact_directory_empty": true,
+    "error": "job was cancelled"
+  },
+  "passed": true,
+  "rejected": {
+    "artifact_directory_empty": true,
+    "error": "approval was rejected"
+  },
+  "schema_version": 1,
+  "source_sha256_after": "6c692abedd83e1f74fb9313a41790a977483bb4202691d87a5618cf3727b7a29",
+  "source_sha256_before": "6c692abedd83e1f74fb9313a41790a977483bb4202691d87a5618cf3727b7a29"
+}

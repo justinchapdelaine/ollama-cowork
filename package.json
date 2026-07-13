@@ -1,0 +1,12 @@
+{
+  "name": "ollama-cowork-spike-001",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Spike 001 proof harnesses for ollama-cowork",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.65"
+  }
+}

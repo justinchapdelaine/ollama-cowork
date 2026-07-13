@@ -1,0 +1,50 @@
+{
+  "generated_at": "2026-07-12T19:58:48.457Z",
+  "source_sha256_before": "6c692abedd83e1f74fb9313a41790a977483bb4202691d87a5618cf3727b7a29",
+  "source_sha256_after": "6c692abedd83e1f74fb9313a41790a977483bb4202691d87a5618cf3727b7a29",
+  "rewrite": {
+    "status": "rewritten",
+    "schema_version": 1,
+    "source_sha256": "6c692abedd83e1f74fb9313a41790a977483bb4202691d87a5618cf3727b7a29",
+    "output_sha256": "a94b6530ed88a67b5fc127d86b224cca0d086907ecff63a761f4862065553b0d",
+    "output": "\\\\?\\C:\\Users\\<user>\\AppData\\Local\\Temp\\ollama-cowork-docx-proof-2b2c194520644b5d8cddd3ae3eaf5d63\\output\\spike-001-revised.docx",
+    "heading": "Executive Summary",
+    "replaced_paragraph_count": 2
+  },
+  "validation": {
+    "status": "valid",
+    "schema_version": 1,
+    "source_sha256": "a94b6530ed88a67b5fc127d86b224cca0d086907ecff63a761f4862065553b0d",
+    "sections": [
+      {
+        "heading": "Spike 001 Synthetic DOCX Fixture",
+        "paragraphs": [
+          "This disposable document exists only to validate a safe, revised-copy DOCX workflow. It contains no user or proprietary source material."
+        ]
+      },
+      {
+        "heading": "Executive Summary",
+        "paragraphs": [
+          "Revised safely inside SRT.",
+          "This is a new validated copy; the source remains immutable."
+        ]
+      },
+      {
+        "heading": "Operating Constraints",
+        "paragraphs": [
+          "This adjacent section must remain unchanged during the Executive Summary rewrite. Network access is not required by the document tool.",
+          "Validation Canary",
+          "SPIKE001-ORIGINAL-CANARY-7F93D1"
+        ]
+      }
+    ]
+  },
+  "overwrite_denial": {
+    "status": "error",
+    "schema_version": 1,
+    "code": "docx_tool_error",
+    "message": "output already exists; overwrite is forbidden"
+  },
+  "reset_error": null,
+  "passed": true
+}

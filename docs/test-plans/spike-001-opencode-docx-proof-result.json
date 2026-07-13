@@ -1,0 +1,36 @@
+{
+    "generated_at":  "2026-07-13T01:47:06.1775126Z",
+    "opencode_version":  "1.17.18",
+    "srt_version":  "0.0.65",
+    "model":  "gemma4:12b",
+    "scenarios":  [
+                      {
+                          "action":  "once",
+                          "driver_passed":  true,
+                          "artifact_count":  1,
+                          "artifact_passed":  true,
+                          "permission_requested":  true,
+                          "broker_decision":  true,
+                          "executed":  true
+                      },
+                      {
+                          "action":  "reject",
+                          "driver_passed":  true,
+                          "artifact_count":  0,
+                          "artifact_passed":  true,
+                          "permission_requested":  true,
+                          "broker_decision":  true,
+                          "executed":  false
+                      },
+                      {
+                          "action":  "abort",
+                          "driver_passed":  true,
+                          "artifact_count":  0,
+                          "artifact_passed":  true,
+                          "permission_requested":  true,
+                          "broker_decision":  true,
+                          "executed":  false
+                      }
+                  ],
+    "passed":  true
+}

@@ -1,0 +1,141 @@
+{
+  "generated_at": "2026-07-12T10:25:29.531Z",
+  "srt_version": "0.0.65",
+  "srt_win_path": "C:\\Program Files\\ollama-cowork-spike\\srt\\0.0.65\\srt-win.exe",
+  "node": "C:\\Program Files\\nodejs\\node.exe",
+  "source_docx": "C:\\Users\\<user>\\Documents\\GitHub\\ollama-cowork\\tests\\fixtures\\spike-001-original.docx",
+  "source_sha256_before": "6C692ABEDD83E1F74FB9313A41790A977483BB4202691D87A5618CF3727B7A29",
+  "source_sha256_after": "6C692ABEDD83E1F74FB9313A41790A977483BB4202691D87A5618CF3727B7A29",
+  "canaries_intact": true,
+  "initialization_error": null,
+  "reset_error": null,
+  "settings": {
+    "filesystem": {
+      "allowWrite": [
+        "C:\\Users\\<user>\\AppData\\Local\\Temp\\ollama-cowork-srt-proof-482b31cb3e6e4f43aa38f0b5d6335d7a\\allowed-output"
+      ],
+      "denyWrite": [
+        "C:\\Users\\<user>\\Documents\\GitHub\\ollama-cowork\\tests\\fixtures\\spike-001-original.docx",
+        "C:\\Users\\<user>\\AppData\\Local\\Temp\\ollama-cowork-srt-proof-482b31cb3e6e4f43aa38f0b5d6335d7a\\outside-denied"
+      ],
+      "denyRead": [],
+      "allowRead": [
+        "C:\\Users\\<user>\\Documents\\GitHub\\ollama-cowork",
+        "C:\\Users\\<user>\\AppData\\Local\\Temp\\ollama-cowork-srt-proof-482b31cb3e6e4f43aa38f0b5d6335d7a\\allowed-output",
+        "C:\\Program Files\\nodejs"
+      ]
+    },
+    "network": {
+      "allowLocalBinding": false,
+      "allowedDomains": [],
+      "deniedDomains": []
+    },
+    "windows": {
+      "srtWin": {
+        "path": "C:\\Program Files\\ollama-cowork-spike\\srt\\0.0.65\\srt-win.exe"
+      }
+    }
+  },
+  "results": [
+    {
+      "name": "read selected DOCX",
+      "expected": "allow",
+      "exit_code": 0,
+      "signal": null,
+      "timed_out": false,
+      "probe_reached": true,
+      "passed": true,
+      "stdout": "operation succeeded: read",
+      "stderr": ""
+    },
+    {
+      "name": "write controlled output",
+      "expected": "allow",
+      "exit_code": 0,
+      "signal": null,
+      "timed_out": false,
+      "probe_reached": true,
+      "passed": true,
+      "stdout": "operation succeeded: write",
+      "stderr": ""
+    },
+    {
+      "name": "read outside workspace",
+      "expected": "deny",
+      "exit_code": 1,
+      "signal": null,
+      "timed_out": false,
+      "probe_reached": true,
+      "passed": true,
+      "stdout": "",
+      "stderr": "operation failed: Error: EPERM: operation not permitted, open 'C:\\Users\\<user>\\AppData\\Local\\Temp\\ollama-cowork-srt-proof-482b31cb3e6e4f43aa38f0b5d6335d7a\\outside-denied\\read-canary.txt'"
+    },
+    {
+      "name": "write outside output",
+      "expected": "deny",
+      "exit_code": 1,
+      "signal": null,
+      "timed_out": false,
+      "probe_reached": true,
+      "passed": true,
+      "stdout": "",
+      "stderr": "operation failed: Error: EPERM: operation not permitted, open 'C:\\Users\\<user>\\AppData\\Local\\Temp\\ollama-cowork-srt-proof-482b31cb3e6e4f43aa38f0b5d6335d7a\\outside-denied\\write-canary.txt'"
+    },
+    {
+      "name": "modify original DOCX",
+      "expected": "deny",
+      "exit_code": 1,
+      "signal": null,
+      "timed_out": false,
+      "probe_reached": true,
+      "passed": true,
+      "stdout": "",
+      "stderr": "operation failed: Error: EPERM: operation not permitted, open 'C:\\Users\\<user>\\Documents\\GitHub\\ollama-cowork\\tests\\fixtures\\spike-001-original.docx'"
+    },
+    {
+      "name": "HTTP to private Ollama",
+      "expected": "deny",
+      "exit_code": 1,
+      "signal": null,
+      "timed_out": false,
+      "probe_reached": true,
+      "passed": true,
+      "stdout": "",
+      "stderr": "operation failed: Error: connect EACCES <private-lan-host>:11434"
+    },
+    {
+      "name": "direct TCP without proxy environment",
+      "expected": "deny",
+      "exit_code": 1,
+      "signal": null,
+      "timed_out": false,
+      "probe_reached": true,
+      "passed": true,
+      "stdout": "",
+      "stderr": "operation failed: Error: connect EACCES <private-lan-host>:11434"
+    },
+    {
+      "name": "child process write outside output",
+      "expected": "deny",
+      "exit_code": 1,
+      "signal": null,
+      "timed_out": false,
+      "probe_reached": true,
+      "passed": true,
+      "stdout": "",
+      "stderr": "operation failed: Error: EPERM: operation not permitted, open 'C:\\Users\\<user>\\AppData\\Local\\Temp\\ollama-cowork-srt-proof-482b31cb3e6e4f43aa38f0b5d6335d7a\\outside-denied\\child-write-canary.txt'\noperation failed: Error: child exit 1"
+    },
+    {
+      "name": "timeout terminates sandbox process tree",
+      "expected": "timeout",
+      "exit_code": null,
+      "signal": null,
+      "timed_out": true,
+      "probe_reached": false,
+      "passed": true,
+      "stdout": "",
+      "stderr": "ProbeTimeoutError: probe timed out after 750ms"
+    }
+  ],
+  "passed": true
+}

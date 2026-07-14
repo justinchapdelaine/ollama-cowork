@@ -9,6 +9,8 @@ use std::os::windows::fs::OpenOptionsExt;
 
 const RUN_PREFIX: &str = "run-";
 const LEASE_FILE: &str = ".lease";
+const ROOT_MARKER: &str = ".ollama-cowork-runs-v1";
+const ROOT_MARKER_CONTENTS: &[u8] = b"ollama-cowork transient runs v1\n";
 
 pub struct JobWorkspace {
     root: PathBuf,
@@ -77,6 +79,7 @@ pub struct StaleRunCleanupReport {
 impl FilesystemJobWorkspaceFactory {
     pub fn new(runs_root: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&runs_root).map_err(|error| error.to_string())?;
+        ensure_owned_runs_root(&runs_root)?;
         let stale_cleanup = cleanup_stale_runs(&runs_root)?;
         for _ in 0..8 {
             let run_root = runs_root.join(format!("{RUN_PREFIX}{}", random_hex_128()?));
@@ -104,6 +107,38 @@ impl FilesystemJobWorkspaceFactory {
     pub fn stale_cleanup_report(&self) -> &StaleRunCleanupReport {
         &self.stale_cleanup
     }
+}
+
+fn ensure_owned_runs_root(runs_root: &Path) -> Result<(), String> {
+    let marker = runs_root.join(ROOT_MARKER);
+    if marker.is_file() {
+        let contents = fs::read(&marker).map_err(|error| error.to_string())?;
+        return (contents == ROOT_MARKER_CONTENTS)
+            .then_some(())
+            .ok_or_else(|| "workspace root ownership marker is invalid".into());
+    }
+    let entries = fs::read_dir(runs_root)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let safely_migratable = entries.iter().all(|entry| {
+        entry.file_name().to_str().is_some_and(valid_run_name)
+            && entry.path().join(LEASE_FILE).is_file()
+    });
+    if !safely_migratable {
+        return Err(
+            "workspace root is not empty and is not owned by Ollama Cowork; choose a dedicated runs root"
+                .into(),
+        );
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+        .map_err(|error| error.to_string())?;
+    use std::io::Write as _;
+    file.write_all(ROOT_MARKER_CONTENTS)
+        .map_err(|error| error.to_string())
 }
 
 impl JobWorkspaceFactory for FilesystemJobWorkspaceFactory {
@@ -257,6 +292,17 @@ mod tests {
         let workspace = factory.create("job-1", &source).unwrap();
         assert!(factory.create("job-1", &source).is_err());
         drop(workspace);
+    }
+
+    #[test]
+    fn refuses_to_clean_a_nonempty_unowned_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let runs = temp.path().join("runs");
+        fs::create_dir(&runs).unwrap();
+        fs::create_dir(runs.join("run-11111111111111111111111111111111")).unwrap();
+
+        let error = FilesystemJobWorkspaceFactory::new(runs).err().unwrap();
+        assert!(error.contains("not owned by Ollama Cowork"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::artifact_decoder::PublishedDocxDecoder;
 use ollama_cowork_broker_transport::{
     BrokerAuthorizationClient, BrokerAuthorizationConfig, broker_health_proof,
 };
-use ollama_cowork_core::{BROKER_SCHEMA_VERSION, JobCleanup};
+use ollama_cowork_core::{BROKER_SCHEMA_VERSION, JobCancellation, JobCleanup};
 use ollama_cowork_opencode_client::{
     OpencodeApi, OpencodeApiConfig, OpencodeEventTranslator, OpencodeModelConfig,
     OpencodeModelSession, OpencodeProcess, OpencodeProcessConfig, OpencodeSessionProvisioner,
@@ -59,15 +59,19 @@ pub struct RuntimeSettings {
 }
 
 impl RuntimeSettings {
-    pub fn validate(&self) -> Result<(), String> {
-        for (name, path) in [
+    pub fn required_files(&self) -> [(&'static str, &Path); 6] {
+        [
             ("opencode", &self.opencode_executable),
             ("broker host", &self.broker_host_executable),
             ("Node.js", &self.node_executable),
             ("SRT bridge", &self.srt_bridge),
             ("DOCX tool", &self.docx_tool),
             ("SRT helper", &self.srt_win),
-        ] {
+        ]
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, path) in self.required_files() {
             if !path.is_file() {
                 return Err(format!("{name} is unavailable at {}", path.display()));
             }
@@ -178,12 +182,14 @@ pub trait RuntimeReadiness: Send {
         execution_token: &str,
         expected_process_id: u32,
         timeout: Duration,
+        cancellation: &JobCancellation,
     ) -> Result<(), String>;
     fn wait_for_opencode(
         &mut self,
         api: &OpencodeApi,
         expected_process_id: u32,
         timeout: Duration,
+        cancellation: &JobCancellation,
     ) -> Result<(), String>;
 }
 
@@ -197,6 +203,7 @@ impl RuntimeReadiness for HttpRuntimeReadiness {
         execution_token: &str,
         expected_process_id: u32,
         timeout: Duration,
+        cancellation: &JobCancellation,
     ) -> Result<(), String> {
         let client = Client::builder()
             .redirect(Policy::none())
@@ -211,7 +218,7 @@ impl RuntimeReadiness for HttpRuntimeReadiness {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let expected_proof = broker_health_proof(execution_token, &challenge);
-        wait_until(timeout, || {
+        wait_until(timeout, cancellation, || {
             client
                 .get(format!("{base_url}/health?challenge={challenge}"))
                 .timeout(Duration::from_secs(2))
@@ -241,10 +248,14 @@ impl RuntimeReadiness for HttpRuntimeReadiness {
         api: &OpencodeApi,
         expected_process_id: u32,
         timeout: Duration,
+        cancellation: &JobCancellation,
     ) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         let mut last_error = "no HTTP response".to_owned();
         while Instant::now() < deadline {
+            if cancellation.is_cancelled() {
+                return Err("runtime provisioning cancelled".into());
+            }
             match api.health() {
                 Ok(body) if body.get("healthy").and_then(Value::as_bool) == Some(true) => {
                     let port = Url::parse(api.base_url()).unwrap().port().unwrap();
@@ -268,9 +279,16 @@ impl RuntimeReadiness for HttpRuntimeReadiness {
     }
 }
 
-fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+fn wait_until(
+    timeout: Duration,
+    cancellation: &JobCancellation,
+    mut predicate: impl FnMut() -> bool,
+) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        if cancellation.is_cancelled() {
+            return false;
+        }
         if predicate() {
             return true;
         }
@@ -311,6 +329,7 @@ where
         request: RuntimeProvisioningRequest<'_>,
     ) -> Result<ProvisionedRuntime, String> {
         self.settings.validate()?;
+        ensure_not_cancelled(request.cancellation)?;
         let assets = self.assets.materialize(request.workspace.model())?;
         let broker_port = self.ports.allocate()?;
         let mut opencode_port = self.ports.allocate()?;
@@ -367,12 +386,14 @@ where
                     broker_secrets.execution_token,
                     broker_process_id,
                     self.settings.startup_timeout,
+                    request.cancellation,
                 )
                 .map_err(|error| {
                     startup_error(error, [&broker_stdout, &broker_stderr], request.secrets)
                 })?;
 
             let model_secrets = request.secrets.model_process();
+            ensure_not_cancelled(request.cancellation)?;
             let authorization = basic_authorization(model_secrets.opencode_password);
             let api = Arc::new(
                 OpencodeApi::new(OpencodeApiConfig {
@@ -401,11 +422,17 @@ where
             let opencode_process_id = opencode_process.process_id;
             resources.push(Box::new(opencode_process.cleanup));
             self.readiness
-                .wait_for_opencode(&api, opencode_process_id, self.settings.startup_timeout)
+                .wait_for_opencode(
+                    &api,
+                    opencode_process_id,
+                    self.settings.startup_timeout,
+                    request.cancellation,
+                )
                 .map_err(|error| {
                     startup_error(error, [&opencode_stdout, &opencode_stderr], request.secrets)
                 })?;
             let effective = api.config().map_err(|error| error.to_string())?;
+            ensure_not_cancelled(request.cancellation)?;
             validate_effective_opencode_config(
                 &effective,
                 &self.settings.model_id,
@@ -455,6 +482,14 @@ where
             }),
             Err(error) => Err(rollback_resources(resources, error)),
         }
+    }
+}
+
+fn ensure_not_cancelled(cancellation: &JobCancellation) -> Result<(), String> {
+    if cancellation.is_cancelled() {
+        Err("runtime provisioning cancelled".into())
+    } else {
+        Ok(())
     }
 }
 
@@ -783,7 +818,14 @@ mod tests {
 
     struct Readiness(bool);
     impl RuntimeReadiness for Readiness {
-        fn wait_for_broker(&mut self, _: &str, _: &str, _: u32, _: Duration) -> Result<(), String> {
+        fn wait_for_broker(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: u32,
+            _: Duration,
+            _: &JobCancellation,
+        ) -> Result<(), String> {
             if self.0 {
                 Err("injected broker readiness failure".into())
             } else {
@@ -796,6 +838,7 @@ mod tests {
             _: &OpencodeApi,
             _: u32,
             _: Duration,
+            _: &JobCancellation,
         ) -> Result<(), String> {
             unreachable!("opencode readiness is not reached by these rollback tests")
         }
@@ -837,6 +880,7 @@ mod tests {
                 job_id: "job-1",
                 workspace: &workspace,
                 secrets: &secrets,
+                cancellation: &JobCancellation::default(),
             })
             .err()
             .expect("failure injection unexpectedly succeeded");
@@ -861,6 +905,18 @@ mod tests {
         ] {
             assert!(validate_ollama_origin(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn readiness_waits_stop_when_startup_is_cancelled() {
+        let cancellation = JobCancellation::default();
+        cancellation.cancel();
+        let mut calls = 0;
+        assert!(!wait_until(Duration::from_secs(1), &cancellation, || {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 0);
     }
 
     #[test]

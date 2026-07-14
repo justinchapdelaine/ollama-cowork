@@ -42,6 +42,10 @@ fn run() -> Result<Response> {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--version")) {
+        println!("ollama-cowork-docx-tool {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let response = run().unwrap_or_else(Response::from_error);
     println!(
         "{}",

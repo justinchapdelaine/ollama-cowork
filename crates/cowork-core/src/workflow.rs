@@ -1,6 +1,33 @@
 use crate::BrokerOperation;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+#[derive(Clone, Debug, Default)]
+pub struct JobCancellation(Arc<AtomicBool>);
+
+impl JobCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+pub fn validate_workflow_instruction(instruction: &str) -> Result<&str, &'static str> {
+    let instruction = instruction.trim();
+    if instruction.is_empty() || instruction.len() > 16_384 {
+        return Err("instruction is empty or too long");
+    }
+    Ok(instruction)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -135,7 +162,12 @@ pub trait WorkflowJobFactory: Send + Sized {
 
     /// Creates all job resources atomically. Implementations must clean up any
     /// partially created resources before returning `Err`.
-    fn create(&mut self, job_id: &str, source: &Path) -> Result<WorkflowJobFor<Self>, String>;
+    fn create(
+        &mut self,
+        job_id: &str,
+        source: &Path,
+        cancellation: &JobCancellation,
+    ) -> Result<WorkflowJobFor<Self>, String>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -190,5 +222,15 @@ mod tests {
         assert!(json.contains("jobId"));
         assert!(json.contains("actionId"));
         assert!(!json.contains("job_id"));
+    }
+
+    #[test]
+    fn workflow_instruction_validation_is_shared_and_bounded() {
+        assert_eq!(
+            validate_workflow_instruction("  rewrite  ").unwrap(),
+            "rewrite"
+        );
+        assert!(validate_workflow_instruction("   ").is_err());
+        assert!(validate_workflow_instruction(&"x".repeat(16_385)).is_err());
     }
 }

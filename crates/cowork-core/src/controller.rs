@@ -1,7 +1,7 @@
 use crate::{
-    ActionRequest, BrokerOperation, JobCleanup, JobStatus, ModelEvent, ModelSession,
-    MutationAuthorization, MutationDecision, WorkflowCommand, WorkflowEvent, WorkflowEventSink,
-    WorkflowJobFactory,
+    ActionRequest, BrokerOperation, JobCancellation, JobCleanup, JobStatus, ModelEvent,
+    ModelSession, MutationAuthorization, MutationDecision, WorkflowCommand, WorkflowEvent,
+    WorkflowEventSink, WorkflowJobFactory,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -98,164 +98,219 @@ where
                 source,
                 instruction,
             } => {
-                if source
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .map(|value| value.eq_ignore_ascii_case("docx"))
-                    != Some(true)
-                {
-                    return Err(WorkflowError::InvalidRequest("source must be a DOCX"));
-                }
-                let instruction = instruction.trim();
-                if instruction.is_empty() || instruction.len() > 16_384 {
-                    return Err(WorkflowError::InvalidRequest(
-                        "instruction is empty or too long",
-                    ));
-                }
-                let job_id = format!("job-{}", self.next_job);
-                self.next_job += 1;
-                self.events.emit(WorkflowEvent::StatusChanged {
-                    job_id: job_id.clone(),
-                    status: JobStatus::Starting,
-                });
-                let mut resources = match self.factory.create(&job_id, &source) {
-                    Ok(resources) => resources,
-                    Err(_message) => {
-                        self.emit_failure(
-                            &job_id,
-                            "workflow_job_create_failed",
-                            "The document workflow could not be initialized.",
-                        );
-                        return Err(WorkflowError::Model("workflow initialization failed"));
-                    }
-                };
-                if let Err(_message) = resources.session.submit(instruction) {
-                    let _ = resources.cleanup.terminate();
-                    self.emit_failure(
-                        &job_id,
-                        "model_submission_failed",
-                        "The instruction could not be submitted to the model.",
-                    );
-                    return Err(WorkflowError::Model("model submission failed"));
-                }
-                self.jobs.insert(
-                    job_id.clone(),
-                    ActiveJob {
-                        session: resources.session,
-                        authorization: resources.authorization,
-                        cleanup: resources.cleanup,
-                        status: JobStatus::Running,
-                        phase: JobPhase::Submitted,
-                        action: None,
-                        events_seen: 0,
-                    },
-                );
-                self.events.emit(WorkflowEvent::StatusChanged {
-                    job_id: job_id.clone(),
-                    status: JobStatus::Running,
-                });
-                Ok(WorkflowReceipt { job_id })
+                let job_id = self.reserve_job_id();
+                self.start_reserved(job_id, source, instruction, &JobCancellation::default())
             }
             WorkflowCommand::ApproveOnce { job_id, action_id } => {
-                let (permission_id, operation) = self.pending_action(&job_id, &action_id)?;
-                if let Err(_message) = self.active_job_mut(&job_id)?.authorization.decide(
-                    &action_id,
-                    &operation,
-                    MutationDecision::ApprovedOnce,
-                ) {
-                    let _ = self.active_job_mut(&job_id)?.session.cancel();
-                    self.fail_active_job(
-                        &job_id,
-                        "broker_approval_failed",
-                        "The trusted document boundary did not accept the approval.",
-                    )?;
-                    return Err(WorkflowError::Model("broker approval failed"));
-                }
-                if let Err(_message) = self
-                    .active_job_mut(&job_id)?
-                    .session
-                    .decide(&permission_id, true)
-                {
-                    let job = self.active_job_mut(&job_id)?;
-                    let _ = job.session.cancel();
-                    let _ = job.authorization.revoke_unconsumed(&action_id);
-                    self.fail_active_job(
-                        &job_id,
-                        "model_approval_failed",
-                        "The model permission could not be completed; authorization was revoked.",
-                    )?;
-                    return Err(WorkflowError::Model("model approval failed"));
-                }
-                let job = self.active_job_mut(&job_id)?;
-                job.status = JobStatus::Running;
-                job.phase = JobPhase::Approved;
-                self.events.emit(WorkflowEvent::StatusChanged {
-                    job_id: job_id.clone(),
-                    status: JobStatus::Running,
-                });
-                Ok(WorkflowReceipt { job_id })
+                self.handle_approve_once(job_id, action_id)
             }
-            WorkflowCommand::Reject { job_id, action_id } => {
-                let (permission_id, operation) = self.pending_action(&job_id, &action_id)?;
-                if let Err(_message) = self.active_job_mut(&job_id)?.authorization.decide(
-                    &action_id,
-                    &operation,
-                    MutationDecision::Rejected,
-                ) {
-                    let _ = self.active_job_mut(&job_id)?.session.cancel();
-                    self.fail_active_job(
-                        &job_id,
-                        "broker_rejection_failed",
-                        "The trusted document boundary could not record the rejection.",
-                    )?;
-                    return Err(WorkflowError::Model("broker rejection failed"));
-                }
-                if let Err(_message) = self
-                    .active_job_mut(&job_id)?
-                    .session
-                    .decide(&permission_id, false)
-                {
-                    self.fail_active_job(
-                        &job_id,
-                        "model_rejection_failed",
-                        "The model permission could not be rejected cleanly.",
-                    )?;
-                    return Err(WorkflowError::Model("model rejection failed"));
-                }
-                self.finish_active_job(&job_id, JobStatus::Rejected)?;
-                Ok(WorkflowReceipt { job_id })
-            }
-            WorkflowCommand::Cancel { job_id } => {
-                let action_id = self
-                    .active_job_mut(&job_id)?
-                    .action
-                    .as_ref()
-                    .map(|action| action.id.clone())
-                    .unwrap_or_else(|| "workflow-cancel".into());
-                let operation = self
-                    .active_job_mut(&job_id)?
-                    .action
-                    .as_ref()
-                    .map(|action| action.operation.clone())
-                    .unwrap_or(BrokerOperation::Inspect);
-                let authorization_result = self.active_job_mut(&job_id)?.authorization.decide(
-                    &action_id,
-                    &operation,
-                    MutationDecision::Cancelled,
-                );
-                let session_result = self.active_job_mut(&job_id)?.session.cancel();
-                if let Err(_message) = authorization_result.or(session_result) {
-                    self.fail_active_job(
-                        &job_id,
-                        "workflow_cancellation_failed",
-                        "The document workflow could not be cancelled cleanly.",
-                    )?;
-                    return Err(WorkflowError::Model("workflow cancellation failed"));
-                }
-                self.finish_active_job(&job_id, JobStatus::Cancelled)?;
-                Ok(WorkflowReceipt { job_id })
-            }
+            WorkflowCommand::Reject { job_id, action_id } => self.handle_reject(job_id, action_id),
+            WorkflowCommand::Cancel { job_id } => self.handle_cancel(job_id),
         }
+    }
+
+    pub fn reserve_job_id(&mut self) -> String {
+        let job_id = format!("job-{}", self.next_job);
+        self.next_job += 1;
+        job_id
+    }
+
+    pub fn start_reserved(
+        &mut self,
+        job_id: String,
+        source: std::path::PathBuf,
+        instruction: String,
+        cancellation: &JobCancellation,
+    ) -> Result<WorkflowReceipt, WorkflowError> {
+        if source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("docx"))
+            != Some(true)
+        {
+            return Err(WorkflowError::InvalidRequest("source must be a DOCX"));
+        }
+        let instruction = crate::validate_workflow_instruction(&instruction)
+            .map_err(WorkflowError::InvalidRequest)?;
+        self.events.emit(WorkflowEvent::StatusChanged {
+            job_id: job_id.clone(),
+            status: JobStatus::Starting,
+        });
+        if cancellation.is_cancelled() {
+            return self.finish_cancelled_start(job_id);
+        }
+        let mut resources = match self.factory.create(&job_id, &source, cancellation) {
+            Ok(resources) => resources,
+            Err(_message) => {
+                if cancellation.is_cancelled() {
+                    return self.finish_cancelled_start(job_id);
+                }
+                self.emit_failure(
+                    &job_id,
+                    "workflow_job_create_failed",
+                    "The document workflow could not be initialized.",
+                );
+                return Err(WorkflowError::Model("workflow initialization failed"));
+            }
+        };
+        if cancellation.is_cancelled() {
+            let _ = resources.cleanup.terminate();
+            return self.finish_cancelled_start(job_id);
+        }
+        if let Err(_message) = resources.session.submit(instruction) {
+            let _ = resources.cleanup.terminate();
+            self.emit_failure(
+                &job_id,
+                "model_submission_failed",
+                "The instruction could not be submitted to the model.",
+            );
+            return Err(WorkflowError::Model("model submission failed"));
+        }
+        if cancellation.is_cancelled() {
+            let _ = resources.session.cancel();
+            let _ = resources.cleanup.terminate();
+            return self.finish_cancelled_start(job_id);
+        }
+        self.jobs.insert(
+            job_id.clone(),
+            ActiveJob {
+                session: resources.session,
+                authorization: resources.authorization,
+                cleanup: resources.cleanup,
+                status: JobStatus::Running,
+                phase: JobPhase::Submitted,
+                action: None,
+                events_seen: 0,
+            },
+        );
+        self.events.emit(WorkflowEvent::StatusChanged {
+            job_id: job_id.clone(),
+            status: JobStatus::Running,
+        });
+        Ok(WorkflowReceipt { job_id })
+    }
+
+    fn handle_approve_once(
+        &mut self,
+        job_id: String,
+        action_id: String,
+    ) -> Result<WorkflowReceipt, WorkflowError> {
+        let (permission_id, operation) = self.pending_action(&job_id, &action_id)?;
+        if let Err(_message) = self.active_job_mut(&job_id)?.authorization.decide(
+            &action_id,
+            &operation,
+            MutationDecision::ApprovedOnce,
+        ) {
+            let _ = self.active_job_mut(&job_id)?.session.cancel();
+            self.fail_active_job(
+                &job_id,
+                "broker_approval_failed",
+                "The trusted document boundary did not accept the approval.",
+            )?;
+            return Err(WorkflowError::Model("broker approval failed"));
+        }
+        if let Err(_message) = self
+            .active_job_mut(&job_id)?
+            .session
+            .decide(&permission_id, true)
+        {
+            let job = self.active_job_mut(&job_id)?;
+            let _ = job.session.cancel();
+            let _ = job.authorization.revoke_unconsumed(&action_id);
+            self.fail_active_job(
+                &job_id,
+                "model_approval_failed",
+                "The model permission could not be completed; authorization was revoked.",
+            )?;
+            return Err(WorkflowError::Model("model approval failed"));
+        }
+        let job = self.active_job_mut(&job_id)?;
+        job.status = JobStatus::Running;
+        job.phase = JobPhase::Approved;
+        self.events.emit(WorkflowEvent::StatusChanged {
+            job_id: job_id.clone(),
+            status: JobStatus::Running,
+        });
+        Ok(WorkflowReceipt { job_id })
+    }
+
+    fn handle_reject(
+        &mut self,
+        job_id: String,
+        action_id: String,
+    ) -> Result<WorkflowReceipt, WorkflowError> {
+        let (permission_id, operation) = self.pending_action(&job_id, &action_id)?;
+        if let Err(_message) = self.active_job_mut(&job_id)?.authorization.decide(
+            &action_id,
+            &operation,
+            MutationDecision::Rejected,
+        ) {
+            let _ = self.active_job_mut(&job_id)?.session.cancel();
+            self.fail_active_job(
+                &job_id,
+                "broker_rejection_failed",
+                "The trusted document boundary could not record the rejection.",
+            )?;
+            return Err(WorkflowError::Model("broker rejection failed"));
+        }
+        if let Err(_message) = self
+            .active_job_mut(&job_id)?
+            .session
+            .decide(&permission_id, false)
+        {
+            self.fail_active_job(
+                &job_id,
+                "model_rejection_failed",
+                "The model permission could not be rejected cleanly.",
+            )?;
+            return Err(WorkflowError::Model("model rejection failed"));
+        }
+        self.finish_active_job(&job_id, JobStatus::Rejected)?;
+        Ok(WorkflowReceipt { job_id })
+    }
+
+    fn handle_cancel(&mut self, job_id: String) -> Result<WorkflowReceipt, WorkflowError> {
+        let action_id = self
+            .active_job_mut(&job_id)?
+            .action
+            .as_ref()
+            .map(|action| action.id.clone())
+            .unwrap_or_else(|| "workflow-cancel".into());
+        let operation = self
+            .active_job_mut(&job_id)?
+            .action
+            .as_ref()
+            .map(|action| action.operation.clone())
+            .unwrap_or(BrokerOperation::Inspect);
+        let authorization_result = self.active_job_mut(&job_id)?.authorization.decide(
+            &action_id,
+            &operation,
+            MutationDecision::Cancelled,
+        );
+        let session_result = self.active_job_mut(&job_id)?.session.cancel();
+        if let Err(_message) = authorization_result.or(session_result) {
+            self.fail_active_job(
+                &job_id,
+                "workflow_cancellation_failed",
+                "The document workflow could not be cancelled cleanly.",
+            )?;
+            return Err(WorkflowError::Model("workflow cancellation failed"));
+        }
+        self.finish_active_job(&job_id, JobStatus::Cancelled)?;
+        Ok(WorkflowReceipt { job_id })
+    }
+
+    pub fn is_terminal_job(&self, job_id: &str) -> bool {
+        self.finished_jobs.contains(job_id)
+    }
+
+    fn finish_cancelled_start(&mut self, job_id: String) -> Result<WorkflowReceipt, WorkflowError> {
+        self.finished_jobs.insert(job_id.clone());
+        self.events.emit(WorkflowEvent::StatusChanged {
+            job_id: job_id.clone(),
+            status: JobStatus::Cancelled,
+        });
+        Ok(WorkflowReceipt { job_id })
     }
 
     pub fn poll(&mut self, job_id: &str) -> Result<(), WorkflowError> {
@@ -406,6 +461,48 @@ where
         self.finished_jobs.remove(job_id)
     }
 
+    /// Cancels and cleans up every active job without stopping after one failure.
+    ///
+    /// Desktop lifecycle adapters call this before process exit so supervised
+    /// broker, opencode, and sandbox trees cannot be left behind.
+    pub fn shutdown(&mut self) -> Result<(), WorkflowError> {
+        let jobs = std::mem::take(&mut self.jobs);
+        let mut failed = false;
+        for (job_id, mut job) in jobs {
+            let (action_id, operation) = job
+                .action
+                .as_ref()
+                .map(|action| (action.id.clone(), action.operation.clone()))
+                .unwrap_or_else(|| ("workflow-shutdown".into(), BrokerOperation::Inspect));
+            let authorization_failed = job
+                .authorization
+                .decide(&action_id, &operation, MutationDecision::Cancelled)
+                .is_err();
+            let session_failed = job.session.cancel().is_err();
+            let cleanup_failed = job.cleanup.terminate().is_err();
+            let job_failed = authorization_failed || session_failed || cleanup_failed;
+            failed |= job_failed;
+            self.finished_jobs.insert(job_id.clone());
+            if job_failed {
+                self.emit_failure(
+                    &job_id,
+                    "runtime_shutdown_failed",
+                    "The isolated workflow runtime did not stop cleanly.",
+                );
+            } else {
+                self.events.emit(WorkflowEvent::StatusChanged {
+                    job_id,
+                    status: JobStatus::Cancelled,
+                });
+            }
+        }
+        if failed {
+            Err(WorkflowError::Model("runtime shutdown failed"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn pending_action(
         &mut self,
         job_id: &str,
@@ -547,9 +644,10 @@ mod tests {
             Ok(())
         }
     }
-    struct Cleanup;
+    struct Cleanup(Arc<Mutex<usize>>);
     impl JobCleanup for Cleanup {
         fn terminate(&mut self) -> Result<(), String> {
+            *self.0.lock().unwrap() += 1;
             Ok(())
         }
     }
@@ -561,6 +659,7 @@ mod tests {
         submit_error: Option<String>,
         decide_error: Option<String>,
         event_error: Option<String>,
+        cleanup_calls: Arc<Mutex<usize>>,
     }
     impl WorkflowJobFactory for Factory {
         type Session = Session;
@@ -570,6 +669,7 @@ mod tests {
             &mut self,
             _: &str,
             _: &std::path::Path,
+            _: &JobCancellation,
         ) -> Result<crate::WorkflowJobFor<Self>, String> {
             if let Some(message) = self.create_error.take() {
                 return Err(message);
@@ -584,7 +684,7 @@ mod tests {
                     event_error: self.event_error.take(),
                 },
                 authorization: Authorization(self.decisions.clone()),
-                cleanup: Cleanup,
+                cleanup: Cleanup(self.cleanup_calls.clone()),
             })
         }
     }
@@ -615,6 +715,7 @@ mod tests {
                     submit_error: None,
                     decide_error: None,
                     event_error: None,
+                    cleanup_calls: Arc::new(Mutex::new(0)),
                 },
                 Sink(emitted.clone()),
             ),
@@ -812,6 +913,7 @@ mod tests {
                     submit_error: submit_error.map(str::to_owned),
                     decide_error: None,
                     event_error: event_error.map(str::to_owned),
+                    cleanup_calls: Arc::new(Mutex::new(0)),
                 },
                 Sink(emitted.clone()),
             );
@@ -864,6 +966,7 @@ mod tests {
                 submit_error: None,
                 decide_error: Some("reply failed".into()),
                 event_error: None,
+                cleanup_calls: Arc::new(Mutex::new(0)),
             },
             Sink(emitted.clone()),
         );
@@ -913,5 +1016,87 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, WorkflowEvent::Failed { .. }))
         );
+    }
+
+    #[test]
+    fn shutdown_cancels_and_cleans_every_active_job() {
+        let decisions = Arc::new(Mutex::new(Vec::new()));
+        let cancelled = Arc::new(Mutex::new(false));
+        let cleanup_calls = Arc::new(Mutex::new(0));
+        let emitted = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = WorkflowController::new(
+            Factory {
+                events: Some(VecDeque::new()),
+                decisions: decisions.clone(),
+                cancelled: cancelled.clone(),
+                create_error: None,
+                submit_error: None,
+                decide_error: None,
+                event_error: None,
+                cleanup_calls: cleanup_calls.clone(),
+            },
+            Sink(emitted.clone()),
+        );
+        let first = start(&mut controller);
+        let second = start(&mut controller);
+
+        controller.shutdown().unwrap();
+        controller.shutdown().unwrap();
+
+        assert!(*cancelled.lock().unwrap());
+        assert_eq!(*cleanup_calls.lock().unwrap(), 2);
+        assert_eq!(controller.poll(&first), Err(WorkflowError::TerminalJob));
+        assert_eq!(controller.poll(&second), Err(WorkflowError::TerminalJob));
+        assert_eq!(
+            emitted
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    WorkflowEvent::StatusChanged {
+                        status: JobStatus::Cancelled,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            decisions
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.ends_with(":Cancelled"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn reserved_start_honors_cancellation_before_factory_creation() {
+        let (mut controller, _, _, emitted) = controller(vec![]);
+        let cancellation = JobCancellation::default();
+        cancellation.cancel();
+        let job_id = controller.reserve_job_id();
+
+        let receipt = controller
+            .start_reserved(
+                job_id.clone(),
+                "input.docx".into(),
+                "rewrite".into(),
+                &cancellation,
+            )
+            .unwrap();
+
+        assert_eq!(receipt.job_id, job_id);
+        assert!(controller.is_terminal_job(&receipt.job_id));
+        assert!(emitted.lock().unwrap().iter().any(|event| matches!(
+            event,
+            WorkflowEvent::StatusChanged {
+                status: JobStatus::Cancelled,
+                ..
+            }
+        )));
     }
 }

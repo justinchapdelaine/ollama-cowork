@@ -1,4 +1,4 @@
-use ollama_cowork_core::{JobCleanup, WorkflowJobFactory};
+use ollama_cowork_core::{JobCancellation, JobCleanup, WorkflowJobFactory};
 use ollama_cowork_desktop_lib::composition::{
     DesktopWorkflowJobFactory, FilesystemJobWorkspaceFactory, FilesystemRuntimeAssetMaterializer,
     HttpRuntimeReadiness, LiveRuntimeProvisioner, RuntimeSettings,
@@ -50,6 +50,7 @@ fn provisions_and_cleans_up_the_live_runtime() {
         .create(
             "live-runtime",
             &repo.join("tests/fixtures/spike-001-original.docx"),
+            &JobCancellation::default(),
         )
         .unwrap();
     job.cleanup.terminate().unwrap();

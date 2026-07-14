@@ -55,6 +55,10 @@ impl BrokerService for JobService {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--version")) {
+        println!("ollama-cowork-broker-host {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let argument = std::env::args_os()
         .nth(1)
         .expect("usage: broker-host --config-stdin | <config.json>");

@@ -13,13 +13,10 @@ const componentCard = (name: string, value: ComponentHealth): string => `
   </article>`
 
 const render = (health: DesktopHealth): void => {
-  const modelConfigured = health.modelEndpoint.state === "configured"
-  const statusClass = health.ready ? "ready" : modelConfigured ? "pending" : "blocked"
+  const statusClass = health.ready ? "ready" : "blocked"
   const statusText = health.ready
-    ? "Backend prerequisites ready"
-    : modelConfigured
-      ? "Local prerequisites ready · model connectivity pending"
-      : "Setup required before document workflows"
+    ? "Local prerequisites ready · model connectivity checked when a workflow starts"
+    : "Setup required before document workflows"
 
   root.innerHTML = `
     <section class="shell">
@@ -35,9 +32,10 @@ const render = (health: DesktopHealth): void => {
       <section class="grid" aria-label="Backend health">
         ${componentCard("opencode", health.opencode)}
         ${componentCard("Sandbox Runtime", health.sandbox)}
+        ${componentCard("Runtime tools", health.runtimeTools)}
         ${componentCard("Ollama endpoint", health.modelEndpoint)}
       </section>
-      <footer>Desktop ${health.appVersion} · Spike 001 workflow controls are the next milestone.</footer>
+      <footer>Desktop ${health.appVersion} · Spike 001 trusted workflow boundary</footer>
     </section>`
 }
 

@@ -11,7 +11,17 @@ export interface DesktopHealth {
   ready: boolean
   opencode: ComponentHealth
   sandbox: ComponentHealth
+  runtimeTools: ComponentHealth
   modelEndpoint: ComponentHealth
+}
+
+export interface SelectedDocument {
+  selectionId: string
+  displayName: string
+}
+
+export interface WorkflowReceipt {
+  jobId: string
 }
 
 export const DESKTOP_HEALTH_EVENT = "desktop://health"

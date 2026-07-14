@@ -1,8 +1,24 @@
 # Spike 001 Tauri runtime-composition milestone
 
-Status: **LIVE RUNTIME PROVISIONING PASS; TAURI COMMAND FLOW PENDING**
+Status: **TAURI COMMAND BOUNDARY IMPLEMENTED; INTERACTIVE LIVE REWRITE PENDING**
 
 The desktop crate now has a concrete, modular provisioner for one DOCX job. It composes the already-proven broker host, SRT bridge, clean-room DOCX executable, opencode client, and validated artifact decoder without moving their policy into Tauri.
+
+The provisioner is now wired through a transport-neutral application service to
+a Rust-owned native selection command plus five workflow commands: start,
+approve once, reject, cancel, and poll. `workflow://event` carries only the normalized core event contract to
+the main WebView. Internal integration diagnostics are mapped to stable,
+frontend-safe error codes and messages. The WebView receives no generic shell,
+filesystem, patch, network, or process capability.
+
+The WebView receives an opaque, single-use selection ID instead of a local path.
+The replaceable host path policy rejects UNC/device paths and Windows reparse
+points before a selection can become workflow authority.
+The application reserves and returns a job ID before background provisioning,
+enforces one active Spike 001 workflow, and propagates cooperative cancellation
+through broker/opencode readiness. Runtime helpers use a relocatable sibling
+layout prepared by target-aware Tauri build hooks. Transient cleanup requires a validated
+app-owned root marker before inspecting or removing stale runs.
 
 ## Implemented boundaries
 
@@ -25,10 +41,18 @@ The current CLIs still require selecting a free loopback port before each proces
 
 On 2026-07-13 the following passed:
 
-- `cargo test --workspace --all-features` (85 tests, plus the opt-in live test described below);
+- `cargo test --workspace --all-features` (100 tests, plus the opt-in live test described below);
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
 - `cargo fmt --all -- --check`;
 - `git diff --check`.
+
+The prerequisite-health adapter executes identity commands for Node, the broker
+host, the DOCX tool, and the SRT helper, and verifies the copied SRT bridge
+against the version compiled into the desktop. The runtime-preparation hook
+derives Cargo's effective target directory from `cargo metadata`, honors
+Tauri's `TAURI_ENV_TARGET_TRIPLE`, and stages the same assets for default and
+explicit-target layouts. A custom-target proof passed using
+`aarch64-pc-windows-msvc` and an isolated Cargo target directory.
 
 The tests include exact-operation approval binding, secret validation/redaction, oversized-success rejection, bounded child logs, restricted tool-bundle materialization, isolated profile roots, distinct port allocation, child/process-tree listener attestation, independent credential exposure, provider/base-URL/model validation, broker-readiness rollback, opencode-launch rollback, reverse cleanup, workspace leasing, descendant process termination, strict loopback clients, and validated DOCX artifact decoding.
 
@@ -44,9 +68,19 @@ cargo test -p ollama-cowork-desktop --test live_runtime -- --ignored --nocapture
 
 An initial live attempt failed closed because the cleared Windows child environment was too narrow for the pinned executable. The final profile explicitly passes a non-secret OS compatibility allowlist while continuing to isolate `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, and `XDG_CONFIG_HOME`. Child stdout/stderr are drained through the shared supervisor and capped at 1 MiB per stream; startup errors read at most 4 KiB from each and redact all job credentials.
 
-## Remaining live gate
+## Command and lifecycle evidence
 
-Before this milestone is considered integrated into the product flow, drive the same provisioner through narrow Tauri commands and verify that:
+Unit tests use fake workflow and frontend-event adapters to prove that the
+application service preserves the narrow command contract, sanitizes internal
+errors, and keeps Tauri out of domain policy. Core controller tests prove that
+shutdown cancels and cleans every active job and remains idempotent. The actual
+Tauri exit callback invokes that shutdown boundary; supervised cleanup remains
+responsible for terminating broker, opencode, and SRT process trees.
+
+## Remaining interactive live gate
+
+Before this milestone is considered integrated into the product flow, drive the
+new commands from the minimal UI against the live runtime and verify that:
 
 1. unexpected user/global/managed configuration cannot broaden the already-validated effective profile;
 2. the listener and child trees remain localhost-only and console-free from the packaged app;

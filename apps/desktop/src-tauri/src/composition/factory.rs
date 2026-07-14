@@ -2,12 +2,13 @@ use super::{
     CompositeJobCleanup, DynJobCleanup, DynModelSession, DynMutationAuthorization, JobSecrets,
     JobSecretsGenerator, JobWorkspace, JobWorkspaceFactory,
 };
-use ollama_cowork_core::{JobCleanup, WorkflowJob, WorkflowJobFactory};
+use ollama_cowork_core::{JobCancellation, JobCleanup, WorkflowJob, WorkflowJobFactory};
 
 pub struct RuntimeProvisioningRequest<'a> {
     pub job_id: &'a str,
     pub workspace: &'a JobWorkspace,
     pub secrets: &'a JobSecrets,
+    pub cancellation: &'a JobCancellation,
 }
 
 pub struct ProvisionedRuntime {
@@ -54,6 +55,7 @@ where
         &mut self,
         job_id: &str,
         source: &std::path::Path,
+        cancellation: &JobCancellation,
     ) -> Result<WorkflowJob<Self::Session, Self::Authorization, Self::Cleanup>, String> {
         let mut workspace = self.workspaces.create(job_id, source)?;
         let secrets = match self.secrets.generate().and_then(|value| {
@@ -69,6 +71,7 @@ where
             job_id,
             workspace: &workspace,
             secrets: &secrets,
+            cancellation,
         }) {
             Ok(value) => value,
             Err(error) => {
@@ -164,6 +167,7 @@ mod tests {
                 request.secrets.broker_bootstrap().job_token,
                 "44444444444444444444444444444444"
             );
+            assert!(!request.cancellation.is_cancelled());
             if self.fail {
                 return Err("runtime failed".into());
             }
@@ -194,7 +198,9 @@ mod tests {
                 cleanup_calls: calls.clone(),
             },
         );
-        let mut job = factory.create("job-1", &source(temp.path())).unwrap();
+        let mut job = factory
+            .create("job-1", &source(temp.path()), &JobCancellation::default())
+            .unwrap();
         job.cleanup.terminate().unwrap();
         assert_eq!(*calls.lock().unwrap(), 1);
         assert!(!job_root_exists(&jobs, "job-1"));
@@ -213,7 +219,11 @@ mod tests {
                     cleanup_calls: Arc::new(Mutex::new(0)),
                 },
             );
-            assert!(factory.create("job-1", &source(temp.path())).is_err());
+            assert!(
+                factory
+                    .create("job-1", &source(temp.path()), &JobCancellation::default())
+                    .is_err()
+            );
             assert!(!job_root_exists(&jobs, "job-1"));
         }
     }

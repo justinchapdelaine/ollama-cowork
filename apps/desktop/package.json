@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "prepare:runtime:dev": "node ../../scripts/build/prepare-desktop-runtime.mjs",
+    "prepare:runtime:release": "node ../../scripts/build/prepare-desktop-runtime.mjs --release",
     "preview": "vite preview",
     "tauri": "tauri"
   },

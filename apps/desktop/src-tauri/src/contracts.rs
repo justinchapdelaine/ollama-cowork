@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 pub const DESKTOP_HEALTH_EVENT: &str = "desktop://health";
+pub const WORKFLOW_EVENT: &str = "workflow://event";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,5 +27,6 @@ pub struct DesktopHealth {
     pub ready: bool,
     pub opencode: ComponentHealth,
     pub sandbox: ComponentHealth,
+    pub runtime_tools: ComponentHealth,
     pub model_endpoint: ComponentHealth,
 }

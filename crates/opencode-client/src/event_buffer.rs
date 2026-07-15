@@ -52,12 +52,22 @@ mod tests {
     #[test]
     fn channel_is_bounded_and_nonblocking() {
         let (sender, receiver) = bounded_model_event_channel(1).unwrap();
-        sender.try_send(ModelEvent::Text("one".into())).unwrap();
+        sender
+            .try_send(ModelEvent::Text {
+                part_id: "one".into(),
+                text: "one".into(),
+            })
+            .unwrap();
         assert_eq!(
-            sender.try_send(ModelEvent::Text("two".into())),
+            sender.try_send(ModelEvent::Text {
+                part_id: "two".into(),
+                text: "two".into(),
+            }),
             Err(EventBufferError::Full)
         );
-        assert!(matches!(receiver.try_next(), Ok(Some(ModelEvent::Text(text))) if text == "one"));
+        assert!(
+            matches!(receiver.try_next(), Ok(Some(ModelEvent::Text { text, .. })) if text == "one")
+        );
         assert_eq!(receiver.try_next(), Ok(None));
     }
 }

@@ -1,6 +1,7 @@
 use crate::{
     config::DesktopConfig,
     contracts::{ComponentHealth, ComponentState, DesktopHealth},
+    opencode_identity, srt_identity,
 };
 use ollama_cowork_opencode_client::{ProcessError, require_version};
 use sha2::{Digest, Sha256};
@@ -60,11 +61,15 @@ impl DesktopPrerequisiteProbe for SystemDesktopPrerequisiteProbe {
     }
 
     fn sandbox_helper(&self, config: &DesktopConfig) -> Result<String, String> {
-        executable_version(
+        let helper = executable_version(
             &config.srt_win,
             "SRT helper",
-            VersionIdentity::Prefix("srt-win "),
-        )
+            VersionIdentity::Exact(srt_identity::HELPER_VERSION),
+        )?;
+        match srt_identity::matches(&config.srt_win)? {
+            true => Ok(helper),
+            false => Err("SRT helper does not match the proof-tested package identity.".into()),
+        }
     }
 }
 
@@ -121,10 +126,22 @@ fn opencode(config: &DesktopConfig) -> ComponentHealth {
         };
     }
     match require_version(&config.opencode_executable, &config.opencode_version) {
-        Ok(found) => ComponentHealth {
-            state: ComponentState::Ready,
-            version: Some(found),
-            detail: "Pinned opencode prerequisite is available.".into(),
+        Ok(found) => match opencode_identity::matches(&config.opencode_executable) {
+            Ok(true) => ComponentHealth {
+                state: ComponentState::Ready,
+                version: Some(found),
+                detail: "Pinned opencode version and executable identity are available.".into(),
+            },
+            Ok(false) => ComponentHealth {
+                state: ComponentState::Unsupported,
+                version: Some(found),
+                detail: "The opencode version matches, but this executable build was not validated for Spike 001.".into(),
+            },
+            Err(detail) => ComponentHealth {
+                state: ComponentState::Unavailable,
+                version: Some(found),
+                detail,
+            },
         },
         Err(ProcessError::Version { found, .. }) => ComponentHealth {
             state: ComponentState::Unsupported,

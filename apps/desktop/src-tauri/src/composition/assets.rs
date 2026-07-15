@@ -52,6 +52,7 @@ pub struct MaterializedRuntimeAssets {
     pub config_home: PathBuf,
     pub app_data: PathBuf,
     pub local_app_data: PathBuf,
+    pub expected_tools: Vec<RuntimeToolIdentity>,
 }
 
 pub trait RuntimeAssetMaterializer: Send {
@@ -59,8 +60,30 @@ pub trait RuntimeAssetMaterializer: Send {
 }
 
 pub struct RuntimeToolAsset {
+    pub tool_id: &'static str,
     pub filename: &'static str,
     pub contents: &'static [u8],
+    pub expected_description: &'static str,
+    pub expected_parameters: &'static [RuntimeToolParameter],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeToolIdentity {
+    pub tool_id: &'static str,
+    pub description: &'static str,
+    pub parameters: &'static [RuntimeToolParameter],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeToolParameter {
+    pub name: &'static str,
+    pub kind: RuntimeToolParameterKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeToolParameterKind {
+    String,
+    StringArray { min_items: u64, max_items: u64 },
 }
 
 pub trait RuntimeToolBundle: Send {
@@ -72,18 +95,44 @@ pub struct Spike001DocxToolBundle;
 
 impl RuntimeToolBundle for Spike001DocxToolBundle {
     fn tools(&self) -> &'static [RuntimeToolAsset] {
+        static BASH_PARAMETERS: [RuntimeToolParameter; 1] = [RuntimeToolParameter {
+            name: "command",
+            kind: RuntimeToolParameterKind::String,
+        }];
+        static REWRITE_PARAMETERS: [RuntimeToolParameter; 2] = [
+            RuntimeToolParameter {
+                name: "heading",
+                kind: RuntimeToolParameterKind::String,
+            },
+            RuntimeToolParameter {
+                name: "replacement_paragraphs",
+                kind: RuntimeToolParameterKind::StringArray {
+                    min_items: 1,
+                    max_items: 32,
+                },
+            },
+        ];
         static TOOLS: [RuntimeToolAsset; 3] = [
             RuntimeToolAsset {
+                tool_id: "bash",
                 filename: "bash.ts",
                 contents: BASH_DENY_TOOL.as_bytes(),
+                expected_description: "Arbitrary shell execution is unavailable in Spike 001.",
+                expected_parameters: &BASH_PARAMETERS,
             },
             RuntimeToolAsset {
+                tool_id: "docx_inspect",
                 filename: "docx_inspect.ts",
                 contents: DOCX_INSPECT_TOOL.as_bytes(),
+                expected_description: "Inspect the selected DOCX through the trusted local broker.",
+                expected_parameters: &[],
             },
             RuntimeToolAsset {
+                tool_id: "docx_rewrite_section",
                 filename: "docx_rewrite_section.ts",
                 contents: DOCX_REWRITE_TOOL.as_bytes(),
+                expected_description: "Create a revised DOCX copy by replacing one unambiguous Heading1 section through the trusted broker.",
+                expected_parameters: &REWRITE_PARAMETERS,
             },
         ];
         &TOOLS
@@ -124,6 +173,16 @@ impl RuntimeAssetMaterializer for FilesystemRuntimeAssetMaterializer {
             config_home,
             app_data,
             local_app_data,
+            expected_tools: self
+                .bundle
+                .tools()
+                .iter()
+                .map(|asset| RuntimeToolIdentity {
+                    tool_id: asset.tool_id,
+                    description: asset.expected_description,
+                    parameters: asset.expected_parameters,
+                })
+                .collect(),
         })
     }
 }
@@ -154,6 +213,8 @@ mod tests {
         assert!(assets.config_home.is_dir());
         assert!(assets.app_data.is_dir());
         assert!(assets.local_app_data.is_dir());
+        assert_eq!(assets.expected_tools.len(), 3);
+        assert_eq!(assets.expected_tools[1].tool_id, "docx_inspect");
         assert!(materializer.materialize(root.path()).is_err());
     }
 }

@@ -2,13 +2,15 @@ mod assets;
 mod factory;
 mod handles;
 mod ports;
+mod profile;
 mod runtime;
 mod secrets;
 mod workspace;
 
 pub use assets::{
     FilesystemRuntimeAssetMaterializer, MaterializedRuntimeAssets, RuntimeAssetMaterializer,
-    RuntimeToolAsset, RuntimeToolBundle, Spike001DocxToolBundle,
+    RuntimeToolAsset, RuntimeToolBundle, RuntimeToolIdentity, RuntimeToolParameter,
+    RuntimeToolParameterKind, Spike001DocxToolBundle,
 };
 pub use factory::{
     DesktopWorkflowJobFactory, ProvisionedRuntime, RuntimeProvisioner, RuntimeProvisioningRequest,

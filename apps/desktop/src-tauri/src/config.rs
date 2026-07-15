@@ -1,7 +1,9 @@
 use crate::composition::RuntimeSettings;
+use crate::opencode_identity;
 use crate::runtime_assets::{
     RuntimeAssetOverrides, RuntimeAssetResolver, SiblingRuntimeAssetResolver,
 };
+use crate::srt_identity;
 use ollama_cowork_opencode_client::locate_executable;
 use std::time::Duration;
 use std::{env, path::PathBuf};
@@ -27,14 +29,16 @@ impl DesktopConfig {
     }
 
     fn load_with(resolver: &dyn RuntimeAssetResolver) -> Result<Self, String> {
-        let fallback = env::var_os("APPDATA")
+        let fallbacks = env::var_os("APPDATA")
             .map(PathBuf::from)
-            .map(|path| path.join("npm/node_modules/opencode-ai/bin/opencode.exe"));
-        let opencode_executable = locate_executable(
+            .map(|path| path.join("npm/node_modules/opencode-ai/bin/opencode.exe"))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let path_opencode = locate_executable(None, "opencode.exe", env::var_os("PATH"), &[]);
+        let opencode_executable = opencode_identity::select(
             env::var_os("OLLAMA_COWORK_OPENCODE").map(PathBuf::from),
-            "opencode.exe",
-            env::var_os("PATH"),
-            &fallback.into_iter().collect::<Vec<_>>(),
+            path_opencode,
+            fallbacks,
         );
         let node_executable = locate_executable(
             env::var_os("OLLAMA_COWORK_NODE").map(PathBuf::from),
@@ -72,13 +76,13 @@ impl DesktopConfig {
             .unwrap_or_else(|| env::temp_dir().join("ollama-cowork/runs"));
         Ok(Self {
             opencode_executable,
-            opencode_version: "1.17.18".into(),
+            opencode_version: opencode_identity::VERSION.into(),
             broker_host_executable: assets.broker_host,
             node_executable,
             srt_bridge: assets.srt_bridge,
             docx_tool: assets.docx_tool,
             srt_win,
-            srt_version: "0.0.65".into(),
+            srt_version: srt_identity::PACKAGE_VERSION.into(),
             ollama_origin,
             model,
             runs_root,
@@ -89,14 +93,19 @@ impl DesktopConfig {
         RuntimeSettings {
             opencode_executable: self.opencode_executable.clone(),
             opencode_version: self.opencode_version.clone(),
+            opencode_sha256: opencode_identity::SHA256.into(),
+            opencode_length: opencode_identity::FILE_LENGTH,
             broker_host_executable: self.broker_host_executable.clone(),
             node_executable: self.node_executable.clone(),
             srt_bridge: self.srt_bridge.clone(),
             docx_tool: self.docx_tool.clone(),
             srt_win: self.srt_win.clone(),
+            srt_helper_sha256: srt_identity::SHA256.into(),
+            srt_helper_length: srt_identity::FILE_LENGTH,
             ollama_origin: self.ollama_origin.clone(),
             model_id: self.model.clone(),
             startup_timeout: Duration::from_secs(20),
+            tool_load_timeout: Duration::from_secs(60),
             request_timeout: Duration::from_secs(5),
             event_capacity: 256,
         }

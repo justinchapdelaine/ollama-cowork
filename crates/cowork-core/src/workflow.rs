@@ -72,6 +72,24 @@ pub struct ActionRequest {
     pub title: String,
     pub summary: String,
     pub destructive: bool,
+    pub proposal: ActionProposal,
+}
+
+/// A bounded, transport-neutral description of the exact change presented to
+/// the user. Additional workflow types can add variants without coupling the
+/// core controller to a particular frontend.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ActionProposal {
+    DocxSectionRewrite {
+        heading: String,
+        current_paragraphs: Vec<String>,
+        replacement_paragraphs: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -95,6 +113,7 @@ pub enum WorkflowEvent {
     },
     AssistantText {
         job_id: String,
+        part_id: String,
         text: String,
     },
     ActionRequested {
@@ -172,11 +191,15 @@ pub trait WorkflowJobFactory: Send + Sized {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelEvent {
-    Text(String),
+    Text {
+        part_id: String,
+        text: String,
+    },
     ApprovalRequested {
         external_id: String,
         summary: String,
         operation: BrokerOperation,
+        proposal: ActionProposal,
     },
     ToolStarted,
     ToolCompleted,

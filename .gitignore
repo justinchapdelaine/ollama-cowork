@@ -53,6 +53,7 @@ apps/desktop/src-tauri/gen/
 
 # Disposable Spike 001 generated document artifacts
 tests/artifacts/
+tests/fixtures/job-*.revised.docx
 
 # Transient proof failure captures; sanitized evidence can be force-added when
 # it is intentionally retained as part of a reviewed test record.

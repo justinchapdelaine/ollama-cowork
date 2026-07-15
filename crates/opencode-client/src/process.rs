@@ -6,6 +6,8 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    thread,
+    time::Duration,
 };
 use thiserror::Error;
 
@@ -14,6 +16,9 @@ use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const VERSION_PROBE_ATTEMPTS: usize = 3;
+const VERSION_PROBE_RETRY_DELAY: Duration = Duration::from_millis(100);
+const MAX_VERSION_DIAGNOSTIC_CHARS: usize = 512;
 
 fn configure_background_process(command: &mut Command) {
     #[cfg(windows)]
@@ -90,17 +95,30 @@ pub struct OpencodeProcess {
 }
 
 pub fn require_version(executable: &Path, expected: &str) -> Result<String, ProcessError> {
-    let mut command = Command::new(executable);
-    configure_background_process(&mut command);
-    let output = command.arg("--version").output()?;
-    let found = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if !output.status.success() || found != expected {
-        return Err(ProcessError::Version {
-            expected: expected.into(),
-            found,
-        });
+    let mut last_diagnostic = String::new();
+    for attempt in 0..VERSION_PROBE_ATTEMPTS {
+        let mut command = Command::new(executable);
+        configure_background_process(&mut command);
+        let output = command.arg("--version").output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() && stdout == expected {
+            return Ok(stdout);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        last_diagnostic = bounded_version_diagnostic(&stdout, &stderr);
+        if attempt + 1 < VERSION_PROBE_ATTEMPTS {
+            thread::sleep(VERSION_PROBE_RETRY_DELAY);
+        }
     }
-    Ok(found)
+    Err(ProcessError::Version {
+        expected: expected.into(),
+        found: last_diagnostic,
+    })
+}
+
+fn bounded_version_diagnostic(stdout: &str, stderr: &str) -> String {
+    let value = if stdout.is_empty() { stderr } else { stdout };
+    value.chars().take(MAX_VERSION_DIAGNOSTIC_CHARS).collect()
 }
 
 impl OpencodeProcess {
@@ -118,6 +136,9 @@ impl OpencodeProcess {
                 "127.0.0.1",
                 "--port",
                 &config.port.to_string(),
+                "--print-logs",
+                "--log-level",
+                "ERROR",
             ])
             .current_dir(config.workspace)
             .stdin(Stdio::null())
@@ -207,6 +228,16 @@ mod tests {
                 &[PathBuf::from("fallback.exe")]
             ),
             executable
+        );
+    }
+
+    #[test]
+    fn version_diagnostics_prefer_stdout_and_are_bounded() {
+        assert_eq!(bounded_version_diagnostic("1.2.3", "ignored"), "1.2.3");
+        assert_eq!(bounded_version_diagnostic("", "failure"), "failure");
+        assert_eq!(
+            bounded_version_diagnostic("", &"x".repeat(MAX_VERSION_DIAGNOSTIC_CHARS + 20)).len(),
+            MAX_VERSION_DIAGNOSTIC_CHARS
         );
     }
 }

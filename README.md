@@ -1,6 +1,8 @@
 # ollama-cowork
 
-A local-first desktop document workflow using Tauri, opencode, remote Ollama, mandatory sandbox enforcement, and clean-room document tools.
+A local-first desktop AI coworker inspired by general Cowork/Work-style workflows. The current Spike 001 application is an intentionally narrow DOCX vertical slice used to validate Tauri, opencode, remote Ollama, mandatory sandbox enforcement, approval boundaries, and clean-room document tooling before additional capabilities are added.
+
+The product is not intended to remain a DOCX-only editor. Each future task type should select a replaceable workflow profile that supplies only its required model context, tool visibility, approval policy, broker operations, and sandbox policy. The selected attachment remains a trusted host-owned job reference rather than an arbitrary model-controlled filesystem path.
 
 ## Workspace
 
@@ -15,7 +17,7 @@ A local-first desktop document workflow using Tauri, opencode, remote Ollama, ma
 - `docs/test-plans`: retained human- and machine-readable evidence.
 - `tests/fixtures`: synthetic validation inputs.
 
-The Tauri desktop application lives under `apps/desktop`. Its composition layer now owns opaque leased job workspaces, cryptographic job credentials, replaceable opencode tool bundles, isolated configuration, loopback allocation plus child-PID listener attestation, bounded supervised child I/O, challenge-proven broker readiness, model-session construction, exact-operation broker authorization, validated artifact decoding, and reverse-order rollback. Broker bootstrap/control material is transferred over inherited stdin rather than written beneath the model workspace. These remain behind replaceable ports; the next milestone is exposing the composed workflow through narrow Tauri commands and the minimal DOCX UI.
+The Tauri desktop application lives under `apps/desktop`. Its composition layer now owns opaque leased job workspaces, cryptographic job credentials, replaceable opencode tool bundles and prompt profiles, isolated configuration, loopback allocation plus child-PID listener attestation, bounded supervised child I/O, challenge-proven broker readiness, model-session construction, exact-operation broker authorization, validated artifact decoding, and reverse-order rollback. Broker bootstrap/control material is transferred over inherited stdin rather than written beneath the model workspace. These remain behind replaceable ports; interactive allow-once publication is complete, while reject, cancel, crash, and shutdown lifecycle validation remains.
 
 ## Ollama configuration
 

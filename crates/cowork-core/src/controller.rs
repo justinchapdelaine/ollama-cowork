@@ -41,7 +41,6 @@ struct ActiveAction {
 enum JobPhase {
     Submitted,
     AwaitingApproval,
-    Approved,
     ToolRunning,
     ToolCompleted,
     ArtifactReady,
@@ -224,12 +223,18 @@ where
             )?;
             return Err(WorkflowError::Model("model approval failed"));
         }
-        let job = self.active_job_mut(&job_id)?;
-        job.status = JobStatus::Running;
-        job.phase = JobPhase::Approved;
+        {
+            let job = self.active_job_mut(&job_id)?;
+            job.status = JobStatus::Running;
+            job.phase = JobPhase::ToolRunning;
+        }
         self.events.emit(WorkflowEvent::StatusChanged {
             job_id: job_id.clone(),
             status: JobStatus::Running,
+        });
+        self.events.emit(WorkflowEvent::ActionStarted {
+            job_id: job_id.clone(),
+            action_id,
         });
         Ok(WorkflowReceipt { job_id })
     }
@@ -342,14 +347,18 @@ where
                 return Ok(());
             }
             match event {
-                ModelEvent::Text(text) => self.events.emit(WorkflowEvent::AssistantText {
-                    job_id: job_id.into(),
-                    text,
-                }),
+                ModelEvent::Text { part_id, text } => {
+                    self.events.emit(WorkflowEvent::AssistantText {
+                        job_id: job_id.into(),
+                        part_id,
+                        text,
+                    })
+                }
                 ModelEvent::ApprovalRequested {
                     external_id,
                     summary,
                     operation,
+                    proposal,
                 } => {
                     let action_id = format!("action-{}", self.next_action);
                     self.next_action += 1;
@@ -380,32 +389,20 @@ where
                             title: "Create a revised DOCX copy?".into(),
                             summary,
                             destructive: false,
+                            proposal,
                         },
                     });
                     return Ok(());
                 }
                 ModelEvent::ToolStarted => {
-                    let action_id = {
-                        let job = self.active_job_mut(job_id)?;
-                        if job.phase == JobPhase::Approved {
-                            job.action.as_ref().map(|action| action.id.clone())
-                        } else {
-                            None
-                        }
-                    };
-                    let Some(action_id) = action_id else {
+                    if self.active_job_mut(job_id)?.phase != JobPhase::ToolRunning {
                         self.fail_active_job(
                             job_id,
                             "invalid_workflow_transition",
                             "DOCX tool started without an approved action",
                         )?;
                         return Ok(());
-                    };
-                    self.active_job_mut(job_id)?.phase = JobPhase::ToolRunning;
-                    self.events.emit(WorkflowEvent::ActionStarted {
-                        job_id: job_id.into(),
-                        action_id,
-                    });
+                    }
                 }
                 ModelEvent::ToolCompleted => {
                     let job = self.active_job_mut(job_id)?;
@@ -739,6 +736,13 @@ mod tests {
             replacement_paragraphs: vec!["Revised".into()],
         }
     }
+    fn rewrite_proposal() -> crate::ActionProposal {
+        crate::ActionProposal::DocxSectionRewrite {
+            heading: "Summary".into(),
+            current_paragraphs: vec!["Current".into()],
+            replacement_paragraphs: vec!["Revised".into()],
+        }
+    }
 
     #[test]
     fn approval_is_correlated_and_forwarded_once() {
@@ -747,6 +751,7 @@ mod tests {
                 external_id: "external".into(),
                 summary: "Create input.revised.docx".into(),
                 operation: rewrite_operation(),
+                proposal: rewrite_proposal(),
             }]);
         let job = start(&mut controller);
         controller.poll(&job).unwrap();
@@ -774,6 +779,13 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, WorkflowEvent::ActionRequested { .. }))
         );
+        assert!(
+            emitted
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, WorkflowEvent::ActionStarted { action_id, .. } if action_id == "action-1"))
+        );
     }
 
     #[test]
@@ -782,6 +794,7 @@ mod tests {
             external_id: "external".into(),
             summary: "rewrite".into(),
             operation: rewrite_operation(),
+            proposal: rewrite_proposal(),
         }]);
         let job = start(&mut rejected);
         rejected.poll(&job).unwrap();
@@ -824,8 +837,8 @@ mod tests {
                 external_id: "permission-id".into(),
                 summary: "rewrite".into(),
                 operation: rewrite_operation(),
+                proposal: rewrite_proposal(),
             },
-            ModelEvent::ToolStarted,
             ModelEvent::ToolCompleted,
             ModelEvent::ArtifactReady(artifact.clone()),
             ModelEvent::Idle,
@@ -848,6 +861,20 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn tool_started_before_host_approval_still_fails_closed() {
+        let (mut controller, decisions, _, emitted) = controller(vec![ModelEvent::ToolStarted]);
+        let job = start(&mut controller);
+        controller.poll(&job).unwrap();
+
+        assert!(decisions.lock().unwrap().is_empty());
+        assert!(emitted.lock().unwrap().iter().any(|event| matches!(
+            event,
+            WorkflowEvent::Failed { code, .. } if code == "invalid_workflow_transition"
+        )));
+        assert_eq!(controller.poll(&job), Err(WorkflowError::TerminalJob));
     }
 
     #[test]
@@ -957,6 +984,7 @@ mod tests {
                         external_id: "permission".into(),
                         summary: "rewrite".into(),
                         operation: rewrite_operation(),
+                        proposal: rewrite_proposal(),
                     }]
                     .into(),
                 ),
@@ -997,7 +1025,10 @@ mod tests {
     fn poll_budget_yields_without_failing_a_verbose_job() {
         let (mut controller, _, _, emitted) = controller(
             (0..300)
-                .map(|index| ModelEvent::Text(index.to_string()))
+                .map(|index| ModelEvent::Text {
+                    part_id: format!("part-{index}"),
+                    text: index.to_string(),
+                })
                 .collect(),
         );
         let job = start(&mut controller);

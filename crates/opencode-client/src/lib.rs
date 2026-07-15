@@ -2,6 +2,7 @@ mod api;
 mod event_buffer;
 mod model_session;
 mod process;
+mod prompt;
 mod sse;
 mod translate;
 
@@ -16,5 +17,9 @@ pub use model_session::{
 pub use process::{
     OpencodeProcess, OpencodeProcessConfig, ProcessError, locate_executable, require_version,
 };
+pub use prompt::OpencodePromptProfile;
 pub use sse::{OpencodeEvent, SseDecoder, read_sse, read_sse_cancellable};
-pub use translate::{OpencodeEventTranslator, ValidatedArtifactDecoder};
+pub use translate::{
+    InspectedSections, OpencodeEventTranslator, ValidatedArtifactDecoder,
+    ValidatedInspectionDecoder,
+};

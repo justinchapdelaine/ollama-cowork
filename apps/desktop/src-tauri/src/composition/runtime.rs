@@ -1,9 +1,14 @@
+use super::profile::{
+    SPIKE_001_DOCX_AGENT_ID, SPIKE_001_DOCX_SYSTEM_PROMPT, spike_001_docx_prompt_profile,
+};
 use super::{
     CompositeJobCleanup, DynJobCleanup, DynModelSession, DynMutationAuthorization,
     LoopbackPortAllocator, MaterializedRuntimeAssets, ProvisionedRuntime, RuntimeAssetMaterializer,
-    RuntimeProvisioner, RuntimeProvisioningRequest,
+    RuntimeProvisioner, RuntimeProvisioningRequest, RuntimeToolIdentity, RuntimeToolParameterKind,
 };
-use crate::artifact_decoder::PublishedDocxDecoder;
+use crate::artifact_decoder::TrustedDocxOutputDecoder;
+use crate::opencode_identity;
+use crate::srt_identity;
 use ollama_cowork_broker_transport::{
     BrokerAuthorizationClient, BrokerAuthorizationConfig, broker_health_proof,
 };
@@ -22,7 +27,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fmt, fs,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -38,22 +43,29 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PROVIDER_ID: &str = "ollama-lan";
 const PERMISSION_NAME: &str = "docx_rewrite_section";
 const TOOL_NAME: &str = "docx_rewrite_section";
+const READ_ONLY_TOOL_NAME: &str = "docx_inspect";
 const MAX_ARTIFACT_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_SOURCE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_CHILD_LOG_BYTES: u64 = 1024 * 1024;
+const OPENCODE_START_ATTEMPTS: usize = 2;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeSettings {
     pub opencode_executable: PathBuf,
     pub opencode_version: String,
+    pub opencode_sha256: String,
+    pub opencode_length: u64,
     pub broker_host_executable: PathBuf,
     pub node_executable: PathBuf,
     pub srt_bridge: PathBuf,
     pub docx_tool: PathBuf,
     pub srt_win: PathBuf,
+    pub srt_helper_sha256: String,
+    pub srt_helper_length: u64,
     pub ollama_origin: String,
     pub model_id: String,
     pub startup_timeout: Duration,
+    pub tool_load_timeout: Duration,
     pub request_timeout: Duration,
     pub event_capacity: usize,
 }
@@ -77,14 +89,36 @@ impl RuntimeSettings {
             }
         }
         if self.opencode_version.trim().is_empty()
+            || self.opencode_sha256.trim().is_empty()
+            || self.opencode_length == 0
             || self.model_id.trim().is_empty()
             || self.startup_timeout.is_zero()
+            || self.tool_load_timeout.is_zero()
             || self.request_timeout.is_zero()
             || self.event_capacity == 0
         {
             return Err("runtime settings contain an empty or zero value".into());
         }
         validate_ollama_origin(&self.ollama_origin)?;
+        self.validate_opencode_identity()?;
+        if !srt_identity::matches_expected(
+            &self.srt_win,
+            self.srt_helper_length,
+            &self.srt_helper_sha256,
+        )? {
+            return Err("SRT helper does not match the proof-tested package identity".into());
+        }
+        Ok(())
+    }
+
+    fn validate_opencode_identity(&self) -> Result<(), String> {
+        if !opencode_identity::matches_expected(
+            &self.opencode_executable,
+            self.opencode_length,
+            &self.opencode_sha256,
+        )? {
+            return Err("opencode does not match the proof-tested executable identity".into());
+        }
         Ok(())
     }
 }
@@ -305,6 +339,13 @@ pub struct LiveRuntimeProvisioner<P, A, L, H> {
     readiness: H,
 }
 
+struct ReadyOpencode {
+    api: Arc<OpencodeApi>,
+    cleanup: DynJobCleanup,
+    stdout_log: PathBuf,
+    stderr_log: PathBuf,
+}
+
 impl<P, A, L, H> LiveRuntimeProvisioner<P, A, L, H> {
     pub fn new(settings: RuntimeSettings, ports: P, assets: A, launcher: L, readiness: H) -> Self {
         Self {
@@ -315,6 +356,115 @@ impl<P, A, L, H> LiveRuntimeProvisioner<P, A, L, H> {
             readiness,
         }
     }
+
+    fn start_ready_opencode(
+        &mut self,
+        broker_port: u16,
+        broker_url: &str,
+        assets: &MaterializedRuntimeAssets,
+        request: &RuntimeProvisioningRequest<'_>,
+    ) -> Result<ReadyOpencode, String>
+    where
+        P: LoopbackPortAllocator,
+        L: RuntimeProcessLauncher,
+        H: RuntimeReadiness,
+    {
+        let model_secrets = request.secrets.model_process();
+        let authorization = basic_authorization(model_secrets.opencode_password);
+        let mut readiness_errors = Vec::new();
+
+        for attempt in 0..OPENCODE_START_ATTEMPTS {
+            ensure_not_cancelled(request.cancellation)?;
+            // Re-attest at the execution boundary so a post-provisioning file
+            // replacement cannot inherit trust from an earlier health check.
+            self.settings.validate_opencode_identity()?;
+            let opencode_port = allocate_distinct_port(&mut self.ports, broker_port)?;
+            let opencode_url = format!("http://127.0.0.1:{opencode_port}");
+            let api = Arc::new(
+                OpencodeApi::new(OpencodeApiConfig {
+                    base_url: opencode_url,
+                    authorization: authorization.clone(),
+                    timeout: self.settings.request_timeout,
+                })
+                .map_err(|error| error.to_string())?,
+            );
+            let suffix = if attempt == 0 {
+                String::new()
+            } else {
+                format!("-attempt-{}", attempt + 1)
+            };
+            let stdout = request
+                .workspace
+                .root()
+                .join(format!("opencode{suffix}-stdout.log"));
+            let stderr = request
+                .workspace
+                .root()
+                .join(format!("opencode{suffix}-stderr.log"));
+            let mut process = self.launcher.start_opencode(OpencodeProcessConfig {
+                executable: self.settings.opencode_executable.clone(),
+                expected_version: self.settings.opencode_version.clone(),
+                workspace: request.workspace.model().to_path_buf(),
+                port: opencode_port,
+                clear_environment: true,
+                environment: opencode_environment(
+                    &self.settings,
+                    assets,
+                    broker_url,
+                    request.secrets,
+                )?,
+                stdout_log: Some(stdout.clone()),
+                stderr_log: Some(stderr.clone()),
+                log_limit_bytes: MAX_CHILD_LOG_BYTES,
+            })?;
+            match self.readiness.wait_for_opencode(
+                &api,
+                process.process_id,
+                self.settings.startup_timeout,
+                request.cancellation,
+            ) {
+                Ok(()) => {
+                    return Ok(ReadyOpencode {
+                        api,
+                        cleanup: process.cleanup,
+                        stdout_log: stdout,
+                        stderr_log: stderr,
+                    });
+                }
+                Err(error) => {
+                    let diagnostic = startup_error(error, &[&stdout, &stderr], request.secrets);
+                    let cleanup = process.cleanup.terminate().err();
+                    readiness_errors.push(match cleanup {
+                        Some(cleanup) => {
+                            format!("{diagnostic}; opencode attempt cleanup failed: {cleanup}")
+                        }
+                        None => diagnostic,
+                    });
+                    if request.cancellation.is_cancelled() {
+                        return Err("runtime provisioning cancelled".into());
+                    }
+                }
+            }
+        }
+
+        Err(format!(
+            "opencode startup attempts failed: {}",
+            readiness_errors.join("; ")
+        ))
+    }
+}
+
+fn allocate_distinct_port(
+    ports: &mut impl LoopbackPortAllocator,
+    excluded: u16,
+) -> Result<u16, String> {
+    for _ in 0..4 {
+        let port = ports.allocate()?;
+        if port != excluded {
+            return Ok(port);
+        }
+    }
+    Err("could not allocate distinct runtime ports".into())
 }
 
 impl<P, A, L, H> RuntimeProvisioner for LiveRuntimeProvisioner<P, A, L, H>
@@ -332,25 +482,12 @@ where
         ensure_not_cancelled(request.cancellation)?;
         let assets = self.assets.materialize(request.workspace.model())?;
         let broker_port = self.ports.allocate()?;
-        let mut opencode_port = self.ports.allocate()?;
-        for _ in 0..4 {
-            if opencode_port != broker_port {
-                break;
-            }
-            opencode_port = self.ports.allocate()?;
-        }
-        if opencode_port == broker_port {
-            return Err("could not allocate distinct runtime ports".into());
-        }
 
         let broker_url = format!("http://127.0.0.1:{broker_port}");
-        let opencode_url = format!("http://127.0.0.1:{opencode_port}");
         let source_sha256 = sha256_file(request.workspace.source())?;
         let broker_secrets = request.secrets.broker_bootstrap();
         let broker_stdout = request.workspace.root().join("broker-stdout.log");
         let broker_stderr = request.workspace.root().join("broker-stderr.log");
-        let opencode_stdout = request.workspace.root().join("opencode-stdout.log");
-        let opencode_stderr = request.workspace.root().join("opencode-stderr.log");
         let broker_bootstrap = BrokerBootstrap::serialize(&BrokerHostConfig {
             schema_version: BROKER_SCHEMA_VERSION,
             port: broker_port,
@@ -389,55 +526,38 @@ where
                     request.cancellation,
                 )
                 .map_err(|error| {
-                    startup_error(error, [&broker_stdout, &broker_stderr], request.secrets)
+                    startup_error(error, &[&broker_stdout, &broker_stderr], request.secrets)
                 })?;
 
-            let model_secrets = request.secrets.model_process();
-            ensure_not_cancelled(request.cancellation)?;
-            let authorization = basic_authorization(model_secrets.opencode_password);
-            let api = Arc::new(
-                OpencodeApi::new(OpencodeApiConfig {
-                    base_url: opencode_url.clone(),
-                    authorization,
-                    timeout: self.settings.request_timeout,
-                })
-                .map_err(|error| error.to_string())?,
-            );
-            let opencode_process = self.launcher.start_opencode(OpencodeProcessConfig {
-                executable: self.settings.opencode_executable.clone(),
-                expected_version: self.settings.opencode_version.clone(),
-                workspace: request.workspace.model().to_path_buf(),
-                port: opencode_port,
-                clear_environment: true,
-                environment: opencode_environment(
-                    &self.settings,
-                    &assets,
-                    &broker_url,
-                    request.secrets,
-                )?,
-                stdout_log: Some(opencode_stdout.clone()),
-                stderr_log: Some(opencode_stderr.clone()),
-                log_limit_bytes: MAX_CHILD_LOG_BYTES,
-            })?;
-            let opencode_process_id = opencode_process.process_id;
-            resources.push(Box::new(opencode_process.cleanup));
-            self.readiness
-                .wait_for_opencode(
-                    &api,
-                    opencode_process_id,
-                    self.settings.startup_timeout,
-                    request.cancellation,
-                )
-                .map_err(|error| {
-                    startup_error(error, [&opencode_stdout, &opencode_stderr], request.secrets)
-                })?;
-            let effective = api.config().map_err(|error| error.to_string())?;
+            let opencode =
+                self.start_ready_opencode(broker_port, &broker_url, &assets, &request)?;
+            let effective = opencode.api.config().map_err(|error| error.to_string())?;
             ensure_not_cancelled(request.cancellation)?;
             validate_effective_opencode_config(
                 &effective,
                 &self.settings.model_id,
                 &self.settings.ollama_origin,
             )?;
+            let tool_schemas = opencode
+                .api
+                .tool_schemas(
+                    PROVIDER_ID,
+                    &self.settings.model_id,
+                    self.settings.tool_load_timeout,
+                )
+                .map_err(|error| {
+                    let internal_log = assets
+                        .config_home
+                        .join(".local/share/opencode/log/opencode.log");
+                    startup_error(
+                        format!("opencode tool initialization failed: {error}"),
+                        &[&opencode.stdout_log, &opencode.stderr_log, &internal_log],
+                        request.secrets,
+                    )
+                })?;
+            validate_tool_schemas(&tool_schemas, &assets.expected_tools)?;
+            let api = opencode.api;
+            resources.push(Box::new(opencode.cleanup));
             let session_id = OpencodeSessionProvisioner::create_session(
                 api.as_ref(),
                 "Ollama Cowork DOCX workflow",
@@ -446,8 +566,16 @@ where
                 session_id.clone(),
                 PERMISSION_NAME.into(),
                 TOOL_NAME.into(),
-                Box::new(PublishedDocxDecoder::new(
+                READ_ONLY_TOOL_NAME.into(),
+                Box::new(TrustedDocxOutputDecoder::new(
                     request.job_id.into(),
+                    source_sha256.clone(),
+                    request.workspace.publish().to_path_buf(),
+                    MAX_ARTIFACT_BYTES,
+                )),
+                Box::new(TrustedDocxOutputDecoder::new(
+                    request.job_id.into(),
+                    source_sha256.clone(),
                     request.workspace.publish().to_path_buf(),
                     MAX_ARTIFACT_BYTES,
                 )),
@@ -459,6 +587,7 @@ where
                     session_id,
                     provider_id: PROVIDER_ID.into(),
                     model_id: self.settings.model_id.clone(),
+                    prompt_profile: spike_001_docx_prompt_profile()?,
                     event_capacity: self.settings.event_capacity,
                     connect_timeout: self.settings.startup_timeout,
                 },
@@ -501,10 +630,14 @@ fn rollback_resources(resources: Vec<Box<dyn JobCleanup>>, error: String) -> Str
     }
 }
 
-fn startup_error(error: String, logs: [&Path; 2], secrets: &super::JobSecrets) -> String {
-    let mut diagnostic = Vec::with_capacity(8 * 1024);
+fn startup_error(error: String, logs: &[&Path], secrets: &super::JobSecrets) -> String {
+    let mut diagnostic = Vec::with_capacity(logs.len() * 4 * 1024);
     for path in logs {
-        if let Ok(file) = fs::File::open(path) {
+        if let Ok(mut file) = fs::File::open(path) {
+            if let Ok(metadata) = file.metadata() {
+                let offset = metadata.len().saturating_sub(4 * 1024);
+                let _ = file.seek(SeekFrom::Start(offset));
+            }
             let _ = file.take(4 * 1024).read_to_end(&mut diagnostic);
         }
     }
@@ -529,19 +662,23 @@ fn opencode_environment(
         "docx_inspect": "allow",
         PERMISSION_NAME: "ask"
     });
+    let hidden_tools = json!({ "bash": false });
     let config = json!({
         "$schema": "https://opencode.ai/config.json",
         "model": format!("{PROVIDER_ID}/{}", settings.model_id),
         "autoupdate": false,
         "share": "disabled",
-        "default_agent": "spike-docx",
+        "default_agent": SPIKE_001_DOCX_AGENT_ID,
         "permission": permission.clone(),
+        "tools": hidden_tools.clone(),
         "agent": {
-            "spike-docx": {
+            SPIKE_001_DOCX_AGENT_ID: {
                 "description": "Perform the single approved Spike 001 DOCX workflow.",
                 "mode": "primary",
                 "model": format!("{PROVIDER_ID}/{}", settings.model_id),
-                "permission": permission
+                "prompt": SPIKE_001_DOCX_SYSTEM_PROMPT,
+                "permission": permission,
+                "tools": hidden_tools
             }
         },
         "provider": {
@@ -562,6 +699,7 @@ fn opencode_environment(
             "OPENCODE_CONFIG_CONTENT".into(),
             serde_json::to_string(&config).map_err(|error| error.to_string())?,
         ),
+        ("OPENCODE_DISABLE_MODELS_FETCH".into(), "true".into()),
         (
             "XDG_CONFIG_HOME".into(),
             assets.config_home.to_string_lossy().into_owned(),
@@ -588,6 +726,16 @@ fn opencode_environment(
             model_secrets.broker_execution_token.into(),
         ),
     ]);
+    #[cfg(windows)]
+    {
+        let isolated_home = assets.config_home.to_string_lossy();
+        let bytes = isolated_home.as_bytes();
+        if bytes.len() < 3 || bytes[1] != b':' || !matches!(bytes[2], b'\\' | b'/') {
+            return Err("isolated opencode home must use an absolute Windows drive path".into());
+        }
+        environment.insert("HOMEDRIVE".into(), isolated_home[..2].into());
+        environment.insert("HOMEPATH".into(), isolated_home[2..].into());
+    }
     for name in [
         "SystemRoot",
         "WINDIR",
@@ -654,18 +802,21 @@ fn validate_effective_opencode_config(
 ) -> Result<(), String> {
     let expected_model = format!("{PROVIDER_ID}/{model_id}");
     let permission = &config["permission"];
-    let agent = &config["agent"]["spike-docx"];
+    let agent = &config["agent"][SPIKE_001_DOCX_AGENT_ID];
     let provider = &config["provider"][PROVIDER_ID];
     if config["model"] != expected_model
-        || config["default_agent"] != "spike-docx"
+        || config["default_agent"] != SPIKE_001_DOCX_AGENT_ID
         || config["share"] != "disabled"
         || config["autoupdate"] != false
         || permission["*"] != "deny"
         || permission["docx_inspect"] != "allow"
         || permission[PERMISSION_NAME] != "ask"
+        || config["tools"]["bash"] != false
         || agent["mode"] != "primary"
         || agent["model"] != expected_model
+        || agent["prompt"] != SPIKE_001_DOCX_SYSTEM_PROMPT
         || agent["permission"] != *permission
+        || agent["tools"] != config["tools"]
         || provider["npm"] != "@ai-sdk/openai-compatible"
         || provider["options"]["baseURL"] != format!("{}/v1", ollama_origin.trim_end_matches('/'))
         || provider["models"][model_id]["name"] != model_id
@@ -675,6 +826,80 @@ fn validate_effective_opencode_config(
         );
     }
     Ok(())
+}
+
+fn validate_tool_schemas(
+    inventory: &Value,
+    expected_tools: &[RuntimeToolIdentity],
+) -> Result<(), String> {
+    let tools = inventory
+        .as_array()
+        .ok_or_else(|| "effective opencode tool inventory is not the expected array".to_owned())?;
+    if expected_tools.is_empty() {
+        return Err("required Spike 001 tool identity set is empty".into());
+    }
+    for expected in expected_tools {
+        let matches = tools
+            .iter()
+            .filter(|tool| {
+                tool.get("id").and_then(Value::as_str) == Some(expected.tool_id)
+                    && tool.get("description").and_then(Value::as_str) == Some(expected.description)
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 || !tool_parameters_match(matches[0].get("parameters"), expected) {
+            return Err(format!(
+                "effective opencode tool inventory did not contain one exact '{}' schema",
+                expected.tool_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn tool_parameters_match(parameters: Option<&Value>, expected: &RuntimeToolIdentity) -> bool {
+    let Some(parameters) = parameters else {
+        return false;
+    };
+    let Some(properties) = parameters.get("properties").and_then(Value::as_object) else {
+        return false;
+    };
+    let required = parameters.get("required").and_then(Value::as_array);
+    if parameters.get("type").and_then(Value::as_str) != Some("object")
+        || properties.len() != expected.parameters.len()
+        || required.map(Vec::len).unwrap_or_default() != expected.parameters.len()
+    {
+        return false;
+    }
+    expected.parameters.iter().all(|parameter| {
+        let Some(schema) = properties.get(parameter.name) else {
+            return false;
+        };
+        if !required
+            .into_iter()
+            .flatten()
+            .any(|name| name.as_str() == Some(parameter.name))
+        {
+            return false;
+        }
+        match parameter.kind {
+            RuntimeToolParameterKind::String => {
+                schema.get("type").and_then(Value::as_str) == Some("string")
+            }
+            RuntimeToolParameterKind::StringArray {
+                min_items,
+                max_items,
+            } => {
+                schema.get("type").and_then(Value::as_str) == Some("array")
+                    && schema.get("minItems").and_then(Value::as_u64) == Some(min_items)
+                    && schema.get("maxItems").and_then(Value::as_u64) == Some(max_items)
+                    && schema
+                        .get("items")
+                        .and_then(|items| items.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("string")
+            }
+        }
+    })
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -743,14 +968,19 @@ mod tests {
         RuntimeSettings {
             opencode_executable: root.join("opencode.exe"),
             opencode_version: "1.17.18".into(),
+            opencode_sha256: format!("{:X}", Sha256::digest(b"fixture")),
+            opencode_length: 7,
             broker_host_executable: root.join("broker.exe"),
             node_executable: root.join("node.exe"),
             srt_bridge: root.join("bridge.mjs"),
             docx_tool: root.join("docx.exe"),
             srt_win: root.join("srt-win.exe"),
+            srt_helper_sha256: format!("{:X}", Sha256::digest(b"fixture")),
+            srt_helper_length: 7,
             ollama_origin: "http://192.0.2.125:11434".into(),
             model_id: "gemma4:12b".into(),
             startup_timeout: Duration::from_secs(1),
+            tool_load_timeout: Duration::from_secs(1),
             request_timeout: Duration::from_secs(1),
             event_capacity: 8,
         }
@@ -844,6 +1074,30 @@ mod tests {
         }
     }
 
+    struct RetryReadiness(VecDeque<Result<(), String>>);
+    impl RuntimeReadiness for RetryReadiness {
+        fn wait_for_broker(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: u32,
+            _: Duration,
+            _: &JobCancellation,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn wait_for_opencode(
+            &mut self,
+            _: &OpencodeApi,
+            _: u32,
+            _: Duration,
+            _: &JobCancellation,
+        ) -> Result<(), String> {
+            self.0.pop_front().expect("unexpected readiness call")
+        }
+    }
+
     fn rollback_fixture(
         broker_readiness_fails: bool,
         opencode_launch_fails: bool,
@@ -920,12 +1174,120 @@ mod tests {
     }
 
     #[test]
+    fn opencode_readiness_gets_one_clean_fresh_port_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = test_settings(root.path());
+        materialize_setting_files(&settings);
+        let source = root.path().join("source.docx");
+        fs::write(&source, b"fixture").unwrap();
+        let mut workspaces =
+            super::super::FilesystemJobWorkspaceFactory::new(root.path().join("runs")).unwrap();
+        let workspace =
+            super::super::JobWorkspaceFactory::create(&mut workspaces, "job-1", &source).unwrap();
+        let assets = MaterializedRuntimeAssets {
+            config_home: workspace.model().join("config"),
+            app_data: workspace.model().join("appdata"),
+            local_app_data: workspace.model().join("localappdata"),
+            expected_tools: Vec::new(),
+        };
+        let cleanup_calls = Arc::new(Mutex::new(0));
+        let mut provisioner = LiveRuntimeProvisioner::new(
+            settings,
+            Ports(VecDeque::from([43124, 43125])),
+            super::super::FilesystemRuntimeAssetMaterializer::default(),
+            Launcher {
+                cleanup_calls: cleanup_calls.clone(),
+                fail_opencode: false,
+            },
+            RetryReadiness(VecDeque::from([
+                Err("first child did not become ready".into()),
+                Ok(()),
+            ])),
+        );
+        let secrets = super::super::JobSecrets::new(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "cccccccccccccccccccccccccccccccc".into(),
+            "dddddddddddddddddddddddddddddddd".into(),
+        )
+        .unwrap();
+        let request = RuntimeProvisioningRequest {
+            job_id: "job-1",
+            workspace: &workspace,
+            secrets: &secrets,
+            cancellation: &JobCancellation::default(),
+        };
+
+        let mut ready = provisioner
+            .start_ready_opencode(43123, "http://127.0.0.1:43123", &assets, &request)
+            .unwrap();
+        assert_eq!(*cleanup_calls.lock().unwrap(), 1);
+        ready.cleanup.terminate().unwrap();
+        assert_eq!(*cleanup_calls.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn opencode_is_reattested_before_the_launcher_receives_it() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = test_settings(root.path());
+        materialize_setting_files(&settings);
+        let source = root.path().join("source.docx");
+        fs::write(&source, b"fixture").unwrap();
+        let mut workspaces =
+            super::super::FilesystemJobWorkspaceFactory::new(root.path().join("runs")).unwrap();
+        let workspace =
+            super::super::JobWorkspaceFactory::create(&mut workspaces, "job-1", &source).unwrap();
+        let assets = MaterializedRuntimeAssets {
+            config_home: workspace.model().join("config"),
+            app_data: workspace.model().join("appdata"),
+            local_app_data: workspace.model().join("localappdata"),
+            expected_tools: Vec::new(),
+        };
+        fs::write(&settings.opencode_executable, b"changed").unwrap();
+        let cleanup_calls = Arc::new(Mutex::new(0));
+        let mut provisioner = LiveRuntimeProvisioner::new(
+            settings,
+            Ports(VecDeque::from([43124])),
+            super::super::FilesystemRuntimeAssetMaterializer::default(),
+            Launcher {
+                cleanup_calls: cleanup_calls.clone(),
+                fail_opencode: false,
+            },
+            RetryReadiness(VecDeque::new()),
+        );
+        let secrets = super::super::JobSecrets::new(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "cccccccccccccccccccccccccccccccc".into(),
+            "dddddddddddddddddddddddddddddddd".into(),
+        )
+        .unwrap();
+        let error = provisioner
+            .start_ready_opencode(
+                43123,
+                "http://127.0.0.1:43123",
+                &assets,
+                &RuntimeProvisioningRequest {
+                    job_id: "job-1",
+                    workspace: &workspace,
+                    secrets: &secrets,
+                    cancellation: &JobCancellation::default(),
+                },
+            )
+            .err()
+            .expect("changed executable unexpectedly reached the launcher");
+        assert!(error.contains("proof-tested executable identity"));
+        assert_eq!(*cleanup_calls.lock().unwrap(), 0);
+    }
+
+    #[test]
     fn opencode_environment_duplicates_default_deny_and_withholds_control_secrets() {
         let root = tempfile::tempdir().unwrap();
         let assets = MaterializedRuntimeAssets {
             config_home: root.path().join("config"),
             app_data: root.path().join("appdata"),
             local_app_data: root.path().join("localappdata"),
+            expected_tools: Vec::new(),
         };
         let secrets = super::super::JobSecrets::new(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -944,11 +1306,25 @@ mod tests {
         let config: Value = serde_json::from_str(&environment["OPENCODE_CONFIG_CONTENT"]).unwrap();
         assert_eq!(config["default_agent"], "spike-docx");
         assert_eq!(config["permission"]["*"], "deny");
+        assert_eq!(config["tools"]["bash"], false);
+        assert_eq!(
+            config["agent"][SPIKE_001_DOCX_AGENT_ID]["prompt"],
+            SPIKE_001_DOCX_SYSTEM_PROMPT
+        );
         assert_eq!(
             config["agent"]["spike-docx"]["permission"],
             config["permission"]
         );
         assert_eq!(config["share"], "disabled");
+        assert_eq!(environment["OPENCODE_DISABLE_MODELS_FETCH"], "true");
+        #[cfg(windows)]
+        {
+            let home = assets.config_home.to_string_lossy();
+            assert_eq!(
+                format!("{}{}", environment["HOMEDRIVE"], environment["HOMEPATH"]),
+                home
+            );
+        }
         assert_eq!(
             environment["OLLAMA_COWORK_BROKER_EXECUTION_TOKEN"],
             secrets.model_process().broker_execution_token
@@ -968,10 +1344,13 @@ mod tests {
             "share": "disabled",
             "autoupdate": false,
             "permission": {"*":"deny","docx_inspect":"allow","docx_rewrite_section":"ask"},
+            "tools": {"bash":false},
             "agent": {"spike-docx": {
                 "mode":"primary",
                 "model":"ollama-lan/gemma4:12b",
-                "permission":{"*":"deny","docx_inspect":"allow","docx_rewrite_section":"ask"}
+                "prompt": SPIKE_001_DOCX_SYSTEM_PROMPT,
+                "permission":{"*":"deny","docx_inspect":"allow","docx_rewrite_section":"ask"},
+                "tools":{"bash":false}
             }},
             "provider": {"ollama-lan": {
                 "npm":"@ai-sdk/openai-compatible",
@@ -986,6 +1365,81 @@ mod tests {
             validate_effective_opencode_config(&config, "gemma4:12b", "http://192.0.2.125:11434")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn tool_schema_validation_requires_exact_id_description_and_parameters() {
+        static BASH_PARAMETERS: [super::super::RuntimeToolParameter; 1] =
+            [super::super::RuntimeToolParameter {
+                name: "command",
+                kind: RuntimeToolParameterKind::String,
+            }];
+        static REWRITE_PARAMETERS: [super::super::RuntimeToolParameter; 2] = [
+            super::super::RuntimeToolParameter {
+                name: "heading",
+                kind: RuntimeToolParameterKind::String,
+            },
+            super::super::RuntimeToolParameter {
+                name: "replacement_paragraphs",
+                kind: RuntimeToolParameterKind::StringArray {
+                    min_items: 1,
+                    max_items: 32,
+                },
+            },
+        ];
+        let schemas = json!([
+            {"id":"bash","description":"deny marker","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}},
+            {"id":"docx_inspect","description":"inspect marker","parameters":{"type":"object","properties":{},"required":[]}},
+            {"id":"docx_rewrite_section","description":"rewrite marker","parameters":{"type":"object","properties":{"heading":{"type":"string"},"replacement_paragraphs":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":32}},"required":["heading","replacement_paragraphs"]}}
+        ]);
+        let expected = [
+            RuntimeToolIdentity {
+                tool_id: "bash",
+                description: "deny marker",
+                parameters: &BASH_PARAMETERS,
+            },
+            RuntimeToolIdentity {
+                tool_id: "docx_inspect",
+                description: "inspect marker",
+                parameters: &[],
+            },
+            RuntimeToolIdentity {
+                tool_id: "docx_rewrite_section",
+                description: "rewrite marker",
+                parameters: &REWRITE_PARAMETERS,
+            },
+        ];
+        validate_tool_schemas(&schemas, &expected).unwrap();
+
+        let mut built_in_same_id = schemas.clone();
+        built_in_same_id.as_array_mut().unwrap().push(json!({
+            "id":"bash",
+            "description":"built-in shell tool",
+            "parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}
+        }));
+        validate_tool_schemas(&built_in_same_id, &expected).unwrap();
+
+        let mut swapped = schemas.clone();
+        swapped[0]["description"] = json!("inspect marker");
+        assert!(validate_tool_schemas(&swapped, &expected).is_err());
+
+        let mut duplicate = schemas.clone();
+        let duplicate_entry = duplicate[0].clone();
+        duplicate.as_array_mut().unwrap().push(duplicate_entry);
+        assert!(validate_tool_schemas(&duplicate, &expected).is_err());
+
+        let mut missing_parameters = schemas.clone();
+        missing_parameters[1]
+            .as_object_mut()
+            .unwrap()
+            .remove("parameters");
+        assert!(validate_tool_schemas(&missing_parameters, &expected).is_err());
+
+        let mut widened_parameters = schemas;
+        widened_parameters[2]["parameters"]["properties"]["path"] = json!({"type":"string"});
+        widened_parameters[2]["parameters"]["required"] =
+            json!(["heading", "replacement_paragraphs", "path"]);
+        assert!(validate_tool_schemas(&widened_parameters, &expected).is_err());
     }
 
     #[test]

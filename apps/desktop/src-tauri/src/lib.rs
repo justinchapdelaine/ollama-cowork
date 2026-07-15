@@ -8,8 +8,10 @@ mod contracts;
 mod document_picker;
 mod events;
 mod health;
+pub mod opencode_identity;
 mod runtime_assets;
 mod selection;
+pub mod srt_identity;
 
 use config::DesktopConfig;
 use contracts::DESKTOP_HEALTH_EVENT;

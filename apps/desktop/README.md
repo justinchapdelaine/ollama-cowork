@@ -11,6 +11,9 @@ Current milestone:
 - typed configuration loaded once in Rust;
 - a transport-neutral, mutex-owned application service between Tauri and the
   workflow controller, with slow operations dispatched off the UI thread;
+- an injectable TypeScript transport, pure workflow state machine,
+  scheduler-driven polling coordinator, and safe DOM renderer for the minimal
+  select/start/approve/reject/cancel/result flow;
 - a framework-neutral job factory split into replaceable workspace, credential,
   runtime-provisioning, and cleanup boundaries;
 - no shell, filesystem, dialog, network, or process permission exposed to the WebView.
@@ -27,6 +30,14 @@ ID and display name. Spike 001 enforces one active workflow. Start returns its
 reserved job ID before provisioning finishes, and cancellation is propagated
 through runtime readiness so app shutdown does not wait for the full startup
 timeout.
+
+Assistant text, approval summaries, errors, health details, and artifact
+metadata are rendered through DOM `textContent`; the interactive workflow has
+no raw-HTML rendering path for runtime-controlled content. The UI sees only the
+opaque selection ID, normalized workflow events, and narrow command receipts.
+Approval cards render a structured current/proposed section comparison derived
+from the trusted clean-room inspection result; the model cannot supply or alter
+the displayed current text independently of that inspection.
 
 The job factory creates filesystem-safe per-job model/private-output directories,
 requires distinct redacted job credentials, rolls back failed construction, and

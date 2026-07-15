@@ -1,4 +1,4 @@
-use crate::{OpencodeEvent, SseDecoder};
+use crate::{OpencodeEvent, OpencodePromptProfile, SseDecoder};
 use futures_util::StreamExt;
 use reqwest::{
     Url,
@@ -15,6 +15,7 @@ const MAX_HEALTH_BODY_BYTES: usize = 64 * 1024;
 const MAX_CONFIG_BODY_BYTES: usize = 1024 * 1024;
 const MAX_SESSION_BODY_BYTES: usize = 256 * 1024;
 const MAX_MESSAGES_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TOOL_SCHEMAS_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct OpencodeApiConfig {
@@ -236,14 +237,39 @@ impl OpencodeApi {
             MAX_SESSION_BODY_BYTES,
         )
     }
+    pub fn tool_schemas(
+        &self,
+        provider: &str,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<Value, OpencodeApiError> {
+        if provider.trim().is_empty() || model.trim().is_empty() || timeout.is_zero() {
+            return Err(OpencodeApiError::InvalidEndpoint(
+                "tool schema query requires provider, model, and timeout".into(),
+            ));
+        }
+        Self::bounded_json(
+            self.checked(
+                self.client
+                    .get(self.url("/experimental/tool"))
+                    .header(AUTHORIZATION, &self.config.authorization)
+                    .query(&[("provider", provider), ("model", model)])
+                    .timeout(timeout)
+                    .send()?,
+            )?,
+            "/experimental/tool",
+            MAX_TOOL_SCHEMAS_BODY_BYTES,
+        )
+    }
     pub fn prompt_async(
         &self,
         session_id: &str,
         provider: &str,
         model: &str,
+        profile: &OpencodePromptProfile,
         text: &str,
     ) -> Result<(), OpencodeApiError> {
-        self.checked(self.client.post(self.url(&format!("/session/{session_id}/prompt_async"))).header(AUTHORIZATION,&self.config.authorization).header(CONTENT_TYPE,"application/json").json(&json!({"model":{"providerID":provider,"modelID":model},"parts":[{"type":"text","text":text}]})).timeout(self.config.timeout).send()?)?;
+        self.checked(self.client.post(self.url(&format!("/session/{session_id}/prompt_async"))).header(AUTHORIZATION,&self.config.authorization).header(CONTENT_TYPE,"application/json").json(&json!({"agent":profile.agent_id(),"model":{"providerID":provider,"modelID":model},"system":profile.system_prompt(),"tools":profile.tool_overrides(),"parts":[{"type":"text","text":text}]})).timeout(self.config.timeout).send()?)?;
         Ok(())
     }
     pub fn abort(&self, session_id: &str) -> Result<bool, OpencodeApiError> {
@@ -436,6 +462,78 @@ mod tests {
             })
         ));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn prompt_request_explicitly_selects_the_restricted_workflow_profile() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (request_sent, request_received) = mpsc::sync_channel(1);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                let Some(headers_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..headers_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length: ")
+                            .or_else(|| line.strip_prefix("Content-Length: "))
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap();
+                if request.len() >= headers_end + 4 + content_length {
+                    break;
+                }
+            }
+            request_sent.send(request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let profile = OpencodePromptProfile::restricted(
+            "spike-docx",
+            "A DOCX is already attached.",
+            ["bash".into()],
+        )
+        .unwrap();
+        let api = OpencodeApi::new(config(&origin)).unwrap();
+        api.prompt_async(
+            "session",
+            "ollama-lan",
+            "gemma4:12b",
+            &profile,
+            "Rewrite the Summary.",
+        )
+        .unwrap();
+        let request = request_received.recv().unwrap();
+        server.join().unwrap();
+        let body_start = request
+            .windows(4)
+            .position(|value| value == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let body: Value = serde_json::from_slice(&request[body_start..]).unwrap();
+        assert_eq!(body["agent"], "spike-docx");
+        assert_eq!(body["system"], "A DOCX is already attached.");
+        assert_eq!(body["tools"], json!({"bash": false}));
+        assert_eq!(body["model"]["providerID"], "ollama-lan");
+        assert_eq!(body["model"]["modelID"], "gemma4:12b");
+        assert_eq!(body["parts"][0]["text"], "Rewrite the Summary.");
+        assert!(body.to_string().find(".docx").is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

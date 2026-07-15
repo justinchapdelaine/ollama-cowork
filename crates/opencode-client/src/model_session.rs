@@ -1,6 +1,6 @@
 use crate::{
     EventBufferError, ModelEventReceiver, OpencodeApi, OpencodeEvent, OpencodeEventTranslator,
-    StreamCancellation, bounded_model_event_channel,
+    OpencodePromptProfile, StreamCancellation, bounded_model_event_channel,
 };
 use ollama_cowork_core::{ModelEvent, ModelSession};
 use std::{
@@ -15,6 +15,21 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+const MAX_STREAM_DIAGNOSTIC_CHARS: usize = 1024;
+
+fn stream_failure(error: &str) -> String {
+    let diagnostic = error
+        .chars()
+        .filter(|value| *value != '\0')
+        .take(MAX_STREAM_DIAGNOSTIC_CHARS)
+        .collect::<String>();
+    if diagnostic.trim().is_empty() {
+        "opencode event stream failed".into()
+    } else {
+        format!("opencode event stream failed: {}", diagnostic.trim())
+    }
+}
+
 pub type EventCallback<'a> = Box<dyn FnMut(OpencodeEvent) -> bool + Send + 'a>;
 pub type EventReadyCallback<'a> = Box<dyn FnOnce() + Send + 'a>;
 pub type EventStreamFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
@@ -25,6 +40,7 @@ pub trait OpencodeSessionCommands: Send + Sync + 'static {
         session_id: &str,
         provider_id: &str,
         model_id: &str,
+        profile: &OpencodePromptProfile,
         instruction: &str,
     ) -> Result<(), String>;
     fn reply_permission(&self, permission_id: &str, reply: &str) -> Result<(), String>;
@@ -62,10 +78,18 @@ impl OpencodeSessionCommands for OpencodeApi {
         session_id: &str,
         provider_id: &str,
         model_id: &str,
+        profile: &OpencodePromptProfile,
         instruction: &str,
     ) -> Result<(), String> {
-        OpencodeApi::prompt_async(self, session_id, provider_id, model_id, instruction)
-            .map_err(|error| error.to_string())
+        OpencodeApi::prompt_async(
+            self,
+            session_id,
+            provider_id,
+            model_id,
+            profile,
+            instruction,
+        )
+        .map_err(|error| error.to_string())
     }
 
     fn reply_permission(&self, permission_id: &str, reply: &str) -> Result<(), String> {
@@ -87,7 +111,17 @@ impl OpencodeEventStream for OpencodeApi {
         Box::pin(async move {
             OpencodeApi::stream_events(self, cancellation, on_ready, callback)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| {
+                    let display = error.to_string();
+                    let debug = format!("{error:?}");
+                    format!(
+                        "{display}; detail: {}",
+                        debug
+                            .chars()
+                            .take(MAX_STREAM_DIAGNOSTIC_CHARS)
+                            .collect::<String>()
+                    )
+                })
         })
     }
 }
@@ -97,6 +131,7 @@ pub struct OpencodeModelConfig {
     pub session_id: String,
     pub provider_id: String,
     pub model_id: String,
+    pub prompt_profile: OpencodePromptProfile,
     pub event_capacity: usize,
     pub connect_timeout: std::time::Duration,
 }
@@ -106,6 +141,7 @@ impl OpencodeModelConfig {
         if self.session_id.trim().is_empty()
             || self.provider_id.trim().is_empty()
             || self.model_id.trim().is_empty()
+            || self.prompt_profile.agent_id().trim().is_empty()
         {
             return Err("opencode model configuration contains an empty identifier".into());
         }
@@ -212,7 +248,7 @@ where
                         Ok(()) => PumpState::Failed(
                             "opencode event stream ended before a terminal event".into(),
                         ),
-                        Err(_) => PumpState::Failed("opencode event stream failed".into()),
+                        Err(error) => PumpState::Failed(stream_failure(&error)),
                     };
                 }
             })
@@ -252,6 +288,7 @@ where
             &self.config.session_id,
             &self.config.provider_id,
             &self.config.model_id,
+            &self.config.prompt_profile,
             instruction,
         )
     }
@@ -299,7 +336,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ValidatedArtifactDecoder;
+    use crate::{InspectedSections, ValidatedArtifactDecoder, ValidatedInspectionDecoder};
     use ollama_cowork_core::ArtifactMetadata;
     use serde_json::{Value, json};
     use std::{
@@ -322,12 +359,14 @@ mod tests {
             session: &str,
             provider: &str,
             model: &str,
+            profile: &OpencodePromptProfile,
             text: &str,
         ) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("prompt:{session}:{provider}:{model}:{text}"));
+            self.calls.lock().unwrap().push(format!(
+                "prompt:{session}:{provider}:{model}:{}:{:?}:{text}",
+                profile.agent_id(),
+                profile.tool_overrides()
+            ));
             Ok(())
         }
         fn reply_permission(&self, id: &str, reply: &str) -> Result<(), String> {
@@ -391,6 +430,15 @@ mod tests {
         }
     }
 
+    impl ValidatedInspectionDecoder for Decoder {
+        fn decode_validated_inspection(&self, _: &str) -> Result<InspectedSections, String> {
+            Ok(InspectedSections::from([(
+                "Summary".into(),
+                vec!["Current".into()],
+            )]))
+        }
+    }
+
     fn raw(event_type: &str, properties: Value) -> OpencodeEvent {
         OpencodeEvent {
             event_type: event_type.into(),
@@ -403,6 +451,12 @@ mod tests {
             session_id: "session".into(),
             provider_id: "ollama-lan".into(),
             model_id: "gemma4:12b".into(),
+            prompt_profile: OpencodePromptProfile::restricted(
+                "spike-docx",
+                "A DOCX is attached.",
+                ["bash".into()],
+            )
+            .unwrap(),
             event_capacity: capacity,
             connect_timeout: Duration::from_secs(1),
         }
@@ -413,6 +467,8 @@ mod tests {
             "session".into(),
             "docx_rewrite_section".into(),
             "docx_rewrite_section".into(),
+            "docx_inspect".into(),
+            Box::new(Decoder),
             Box::new(Decoder),
         )
     }
@@ -441,7 +497,7 @@ mod tests {
         assert_eq!(
             *api.calls.lock().unwrap(),
             vec![
-                "prompt:session:ollama-lan:gemma4:12b:rewrite",
+                "prompt:session:ollama-lan:gemma4:12b:spike-docx:{\"bash\": false}:rewrite",
                 "reply:permission:once",
                 "reply:permission-2:reject",
             ]
@@ -451,7 +507,14 @@ mod tests {
     #[test]
     fn pump_translates_session_events_in_order() {
         let api = Arc::new(FakeApi::default());
+        let inspection = json!({
+            "schema_version": 1,
+            "job_id": "job-1",
+            "artifact": null,
+            "result": json!({"schema_version":1,"status":"inspected","source_sha256":"abc","sections":[{"heading":"Summary","paragraphs":["Current"]}]}).to_string()
+        }).to_string();
         api.events.lock().unwrap().extend([
+            raw("message.part.updated", json!({"part":{"id":"inspect","sessionID":"session","type":"tool","tool":"docx_inspect","callID":"inspect-call","state":{"status":"completed","output":inspection}}})),
             raw("permission.asked", json!({"sessionID":"session","id":"permission","permission":"docx_rewrite_section","metadata":{"operation":"rewrite_section","heading":"Summary","replacement_paragraphs":["Revised"]}})),
             raw("message.part.updated", json!({"part":{"sessionID":"session","type":"tool","tool":"docx_rewrite_section","callID":"call","state":{"status":"running"}}})),
             raw("message.part.updated", json!({"part":{"sessionID":"session","type":"tool","tool":"docx_rewrite_section","callID":"call","state":{"status":"completed","output":"artifact"}}})),
@@ -463,7 +526,6 @@ mod tests {
             wait_event(&mut session).unwrap(),
             ModelEvent::ApprovalRequested { .. }
         ));
-        assert_eq!(wait_event(&mut session).unwrap(), ModelEvent::ToolStarted);
         assert_eq!(wait_event(&mut session).unwrap(), ModelEvent::ToolCompleted);
         assert!(matches!(
             wait_event(&mut session).unwrap(),
@@ -477,12 +539,16 @@ mod tests {
         let api = Arc::new(FakeApi::default());
         api.events.lock().unwrap().extend([
             raw(
-                "message.part.updated",
-                json!({"part":{"id":"one","sessionID":"session","type":"text","text":"one"}}),
+                "message.updated",
+                json!({"info":{"id":"assistant","sessionID":"session","role":"assistant"}}),
             ),
             raw(
                 "message.part.updated",
-                json!({"part":{"id":"two","sessionID":"session","type":"text","text":"two"}}),
+                json!({"part":{"id":"one","messageID":"assistant","sessionID":"session","type":"text","text":"one"}}),
+            ),
+            raw(
+                "message.part.updated",
+                json!({"part":{"id":"two","messageID":"assistant","sessionID":"session","type":"text","text":"two"}}),
             ),
         ]);
         let mut session =
@@ -494,7 +560,7 @@ mod tests {
             thread::yield_now();
         }
         assert!(
-            matches!(wait_event(&mut session).unwrap(), ModelEvent::Text(text) if text == "one")
+            matches!(wait_event(&mut session).unwrap(), ModelEvent::Text { text, .. } if text == "one")
         );
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -550,5 +616,18 @@ mod tests {
             matches!(result, Err(error) if error == "opencode event stream did not become ready")
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stream_failure_diagnostics_are_bounded() {
+        assert_eq!(
+            stream_failure("connection reset"),
+            "opencode event stream failed: connection reset"
+        );
+        assert_eq!(stream_failure("\0"), "opencode event stream failed");
+        assert!(
+            stream_failure(&"x".repeat(MAX_STREAM_DIAGNOSTIC_CHARS + 20)).len()
+                <= "opencode event stream failed: ".len() + MAX_STREAM_DIAGNOSTIC_CHARS
+        );
     }
 }
